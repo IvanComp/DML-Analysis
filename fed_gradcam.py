@@ -13,6 +13,7 @@ import os
 import csv
 import shutil
 import argparse
+from sklearn.metrics import f1_score
 
 # --- 1. Data Preparation ---
 def get_dataset(name, img_size):
@@ -241,16 +242,19 @@ def save_visualization(model, loader, client_id, round_id, img_size, dataset_nam
 
 def evaluate(model, loader):
     model.eval()
-    correct = 0
-    total = 0
+    all_preds = []
+    all_targets = []
     with torch.no_grad():
         for data, target in loader:
             data, target = data.to(args.device), target.to(args.device)
             outputs = model(data)
             _, predicted = torch.max(outputs.data, 1)
-            total += target.size(0)
-            correct += (predicted == target).sum().item()
-    return 100 * correct / total
+            all_preds.extend(predicted.cpu().numpy())
+            all_targets.extend(target.cpu().numpy())
+    
+    # Calculate weighted F1 score
+    f1 = f1_score(all_targets, all_preds, average='weighted', zero_division=0)
+    return f1
 
 def aggregate_weights(global_model, local_weights_list, method='fedavg', importances=None, round_id=0, num_clients=4):
     new_state = copy.deepcopy(global_model.state_dict())
@@ -332,13 +336,14 @@ def run_simulation(mode='fedavg', train_data=None, test_loader=None, client_indi
         new_weights = aggregate_weights(global_model, local_weights, method=mode, importances=client_importances, round_id=r+1, num_clients=args.num_clients)
         global_model.load_state_dict(new_weights)
         
-        acc = evaluate(global_model, test_loader)
-        acc_history.append(acc)
+        # Metric
+        f1_val = evaluate(global_model, test_loader)
+        acc_history.append(f1_val)
         
         elapsed = time.time() - start_time
         time_history.append(elapsed)
         
-        print(f"[{mode}] Round {r+1} Acc: {acc:.2f}% | Time: {elapsed:.1f}s")
+        print(f"[{mode}] Round {r+1} F1: {f1_val:.4f} | Time: {elapsed:.1f}s")
         
     return acc_history, time_history
 
@@ -385,8 +390,8 @@ def main():
     plt.plot(range(1, args.rounds+1), acc_avg, label='FedAvg', marker='o')
     plt.plot(range(1, args.rounds+1), acc_grad, label='FedGradCAM', marker='s')
     plt.xlabel('Round')
-    plt.ylabel('Accuracy (%)')
-    plt.title(f'Accuracy Comparison ({args.dataset}, {args.distribution})')
+    plt.ylabel('F1 Score')
+    plt.title(f'F1 Score Comparison ({args.dataset}, {args.distribution})')
     plt.legend()
     plt.grid(True)
     
