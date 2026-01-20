@@ -1,0 +1,20 @@
+# Datasets
+data/
+*.tar.gz
+*.tgz
+*.zip
+
+# Visualizations and Logs
+visualizations/
+channel_importance_log.csv
+simulation_comparison_*.png
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.env
+
+# OS
+.DS_Store
