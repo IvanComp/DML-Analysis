@@ -1,71 +1,118 @@
-# FedSSIM: Federated Learning with Grad-CAM Refinement
+# FedSSIM: Federated Learning with Selective Weight Refinement
 
-Questo progetto simula un processo di Federated Learning utilizzando **FedAvg** e un meccanismo di raffinamento avanzato denominato **FedGradCAM**.
+This project implements Federated Learning (FL) simulations using two distinct approaches: an experimental method based on **Grad-CAM** for selective weight refinement (**FedSSIM**) and a scalable **baseline** system powered by the **Flower** framework.
 
-Il sistema confronta un'aggregazione standard dei pesi con un'aggregazione pesata basata sulle "regioni di interesse" identificate tramite **Grad-CAM** sui singoli client.
+## Installation
 
-## Requisiti
-
-- Python 3.8 o superiore
-- pip
-
-## Configurazione Ambiente
-
-Per creare un ambiente virtuale pulito e installare le dipendenze, esegui i seguenti comandi:
+Ensure you have Python 3.9+ installed, then install the required dependencies:
 
 ```bash
-# 1. Crea l'ambiente virtuale
-python3 -m venv venv
-
-# 2. Attiva l'ambiente virtuale
-# Su macOS/Linux:
-source venv/bin/activate
-# Su Windows:
-# venv\Scripts\activate
-
-# 3. Aggiorna pip e installa le dipendenze
-pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-## Esecuzione Esperimenti
+> [!NOTE]
+> The first time you run a simulation with a new dataset, it will be automatically downloaded via Torchvision APIs. This may require additional time and a stable internet connection.
 
-Lo script principale è `fed_gradcam.py`. Puoi configurare l'esperimento tramite argomenti da riga di comando.
+---
 
-### Comandi principali
+## 1. Experimental Approach (FedSSIM / Grad-CAM)
 
-Esegui una simulazione standard con STL-10 (128x128) e dati Non-IID:
+The script `fed_gradcam.py` implements an experimental approach where clients use Grad-CAM to identify channel importance in the last convolutional layer (`conv3`). The server then performs a "Winner-Takes-All" override for those specific channels based on donor client performance.
 
-```bash
-python fed_gradcam.py --dataset stl10 --num_clients 4 --distribution non-iid --alpha 0.5
-```
-
-Esegui una simulazione con CIFAR-10 e dati IID:
+### FedSSIM Usage
 
 ```bash
-python fed_gradcam.py --dataset cifar10 --num_clients 4 --distribution iid
+python3 fed_gradcam.py [options]
 ```
 
-### Parametri disponibili
+### FedSSIM Parameters
 
-- `--dataset`: `stl10` o `cifar10` (default: `stl10`)
-- `--num_clients`: Numero di client (default: `4`)
-- `--distribution`: `iid` o `non-iid` (default: `non-iid`)
-- `--alpha`: Parametro di Dirichlet per la distribuzione Non-IID (default: `0.5`)
-- `--rounds`: Numero di round di comunicazione (default: `5`)
-- `--epochs`: Epoche locali per ogni client (default: `2`)
-- `--lr`: Learning rate (default: `0.01`)
+- `--dataset`: `stl10` or `cifar10` (default: `stl10`)
+- `--rounds`: Number of FL rounds (default: 5)
+- `--num_clients`: Number of clients (default: 4)
+- `--distribution`: `iid` or `non-iid` (default: `non-iid`)
+- `--alpha`: Dirichlet parameter for non-IID distribution (default: 0.5)
 
-## Output e Risultati
+### FedSSIM Output
 
-Lo script genera automaticamente i seguenti file dopo ogni esecuzione:
+- Performance plots are saved as `fedgradcam_results_[dataset]_[dist].pdf`.
+- Grad-CAM visualizations for each round/client are saved in the `visualizations/` directory as `.pdf` files.
 
-1. **`visualizations/`**: Cartella contenente le heatmap Grad-CAM generate dai client (immagini originali e overlay).
-2. **`channel_importance_log.csv`**: Log dei pesi di importanza dei canali utilizzati dal server per l'aggregazione FedGradCAM.
-3. **`simulation_comparison_[dataset]_[dist].png`**: Grafici comparativi di F1-Score e tempi di addestramento tra FedAvg e FedGradCAM.
+---
 
-## Struttura del progetto
+## 2. Baseline Comparisons (Flower Framework)
 
-- `fed_gradcam.py`: Script principale contenente la logica di training, Grad-CAM e simulazione FL.
-- `requirements.txt`: Elenco delle librerie Python necessarie.
-- `.gitignore`: Configurazione per escludere dati e dataset pesanti dal controllo di versione.
+The script `flower_baseline.py` utilizes **Flower** to run standard FL simulations with a wide variety of aggregation strategies. It supports several image classification architectures.
+
+### Flower Usage
+
+```bash
+python3 flower_baseline.py [options]
+```
+
+### Flower Parameters
+
+- `--baseline`: One or more strategies (use `all` to run all).
+- `--dataset`: `cifar10`, `stl10`, `mnist`, or `oxfordpet` (default: `cifar10`).
+- `--model`: `cnn`, `squeezenet`, `shufflenet`, or `resnet` (default: `cnn`).
+- `--data-distr`: Data distribution (1.0 for IID, < 1.0 for Dirichlet non-IID).
+- `--rounds`: Number of rounds (default: 5).
+- `--num_clients`: Number of clients (default: 4).
+
+### Available Strategies
+
+| Strategy | Full Name | Description |
+| :--- | :--- | :--- |
+| `fedavg` | Federated Averaging | The standard FL algorithm; computes a weighted average of client updates. |
+| `fedavgm` | FedAvg with Momentum | Enhances FedAvg with server-side momentum to accelerate convergence. |
+| `fedprox` | Federated Proximal | Adds a proximal term to local objectives to handle system heterogeneity. |
+| `fedadam` | Federated Adam | Adaptive optimizer that uses estimates of first and second moments of gradients. |
+| `fedyogi` | Federated Yogi | Adaptive optimizer designed to be more robust than Adam in certain FL settings. |
+| `fedadagrad`| Federated Adagrad | Adaptive optimizer that scales the learning rate based on historical gradients. |
+| `fedmedian`| Federated Median | A robust aggregation method that uses the coordinate-wise median. |
+| `fedtrimmedavg`| Trimmed Mean | Robustly aggregates by removing a percentage of extreme client values. |
+| `faulttolerantfedavg`| Fault-Tolerant FedAvg| Standard FedAvg with robust handling of client failures during a round. |
+| `fedexp` | FedExp | Placeholder for the experimental FedExp strategy. |
+
+### Baseline Examples
+
+- **Run FedAvg on OxfordPet using ResNet**:
+
+  ```bash
+  python3 flower_baseline.py --baseline fedavg --dataset oxfordpet --model resnet --rounds 10
+  ```
+
+- **Compare multiple baselines on MNIST**:
+
+  ```bash
+  python3 flower_baseline.py --baseline fedavg fedprox fedexp --dataset mnist --model cnn --rounds 5
+  ```
+
+### Flower Output
+
+- **CSV Logs**: Detailed logs per strategy in `csv/baseline_[method]_[dataset].csv`.
+- **Plots**: Visualizations saved in `results/` using the format `[metric]_[baselines]_[model]_[num_clients]Clients.pdf`.
+
+---
+
+## 3. Automated Experiment Runner
+
+The script `run_experiments.py` is a utility tool to automate the execution of multiple simulations across all supported datasets and models.
+
+### Runner Usage
+
+```bash
+python3 run_experiments.py [options]
+```
+
+By default, it runs all combinations of **Datasets** and **Models** with 20 clients and an Alpha value of 0.5. You can use `--baseline all` to run all strategies for every combination (caution: this will result in a large number of simulations).
+
+---
+
+## Technical Requirements
+
+The script automatically detects and utilizes the best available hardware:
+
+- **CUDA**: NVIDIA GPUs
+- **MPS**: Apple Silicon (Metal Performance Shaders)
+- **CPU**: Fallback for other systems

@@ -155,11 +155,14 @@ class GradCAM:
         return heatmap.cpu().detach().numpy()
 
 # --- 4. FL Logic & Visualization ---
-def train_client(model, loader, epochs, lr):
+def train_client(model, loader, epochs, lr, client_id=None):
+    if client_id is not None:
+        print(f"    - Training client {client_id} for {epochs} epochs...")
     model.train()
     optimizer = optim.SGD(model.parameters(), lr=lr, momentum=0.9)
     criterion = nn.CrossEntropyLoss()
     for ep in range(epochs):
+        epoch_loss = 0
         for data, target in loader:
             data, target = data.to(args.device), target.to(args.device)
             optimizer.zero_grad()
@@ -167,6 +170,7 @@ def train_client(model, loader, epochs, lr):
             loss = criterion(output, target)
             loss.backward()
             optimizer.step()
+            epoch_loss += loss.item()
     return model.state_dict()
 
 def compute_client_importance(model, loader):
@@ -224,17 +228,18 @@ def save_visualization(model, loader, client_id, round_id, img_size, dataset_nam
             
             plt.subplot(1, 3, 2)
             plt.imshow(heatmap, cmap='jet')
-            plt.title("Grad-CAM")
+            plt.title("Grad-CAM Heatmap")
             plt.axis('off')
             
             plt.subplot(1, 3, 3)
             plt.imshow(img_vis)
             plt.imshow(heatmap, cmap='jet', alpha=0.5, extent=(0, img_size, img_size, 0))
-            plt.title(f"Overlay")
+            plt.title(f"Overlay (Pred: {pred})")
             plt.axis('off')
             
-            plt.suptitle(f"Client {client_id} - Round {round_id} - {dataset_name}")
-            plt.savefig(f"{vis_dir}/round_{round_id}_client_{client_id}.png")
+            plt.suptitle(f"Client {client_id} - Round {round_id} - Correct Classification Refinement")
+            plt.tight_layout()
+            plt.savefig(f"{vis_dir}/round_{round_id}_client_{client_id}.pdf")
             plt.close()
             found = True
             break
@@ -268,24 +273,38 @@ def aggregate_weights(global_model, local_weights_list, method='fedavg', importa
         for key in new_state.keys():
             new_state[key] = torch.stack([w[key] for w in local_weights_list]).mean(dim=0)
             
-        # Refinement for Conv3
         if importances is not None:
-            imp_tensor = torch.stack(importances) 
-            voting_weights = imp_tensor / (imp_tensor.sum(dim=0, keepdim=True) + 1e-6)
+            # importances: list of tensors, each [64]
+            imp_tensor = torch.stack(importances) # [num_clients, 64]
             
+            # For each channel, find which client has the maximum importance
+            # win_indices: [64], values are 0..num_clients-1
+            win_indices = torch.argmax(imp_tensor, dim=0)
+            
+            # Log distribution of 'winners'
+            win_counts = torch.bincount(win_indices, minlength=num_clients)
+            print(f"    - Overwriting conv3 channels (Winner-Takes-All):")
+            for i in range(num_clients):
+                print(f"      * Client {i} provided {win_counts[i].item()} channels")
+
             with open('channel_importance_log.csv', 'a', newline='') as f:
                 writer = csv.writer(f)
                 for c in range(64):
-                    row = [round_id, c] + voting_weights[:, c].tolist()
+                    # For logging, we still save all importances but mark the winner if needed
+                    row = [round_id, c] + [1 if win_indices[c] == i else 0 for i in range(num_clients)]
                     writer.writerow(row)
             
-            local_conv3_w = torch.stack([w['conv3.weight'] for w in local_weights_list]) 
-            local_conv3_b = torch.stack([w['conv3.bias'] for w in local_weights_list])   
+            local_conv3_w = torch.stack([w['conv3.weight'] for w in local_weights_list]) # [num_clients, 64, 64, 3, 3]
+            local_conv3_b = torch.stack([w['conv3.bias'] for w in local_weights_list])   # [num_clients, 64]
             
-            w_broadcast = voting_weights.view(num_clients, 64, 1, 1, 1)
+            new_conv3_w = torch.zeros_like(new_state['conv3.weight'])
+            new_conv3_b = torch.zeros_like(new_state['conv3.bias'])
             
-            new_conv3_w = (local_conv3_w * w_broadcast).sum(dim=0)
-            new_conv3_b = (local_conv3_b * voting_weights).sum(dim=0)
+            # Select weights for each channel from the winning client
+            for c in range(64):
+                winner = win_indices[c]
+                new_conv3_w[c] = local_conv3_w[winner, c]
+                new_conv3_b[c] = local_conv3_b[winner]
             
             new_state['conv3.weight'] = new_conv3_w
             new_state['conv3.bias'] = new_conv3_b
@@ -320,7 +339,7 @@ def run_simulation(mode='fedavg', train_data=None, test_loader=None, client_indi
         
         for i in range(args.num_clients):
             local_model = copy.deepcopy(global_model)
-            w_local = train_client(local_model, client_loaders[i], args.epochs, args.lr)
+            w_local = train_client(local_model, client_loaders[i], args.epochs, args.lr, client_id=i)
             local_weights.append(w_local)
             
             if mode == 'fedgradcam':
@@ -350,6 +369,14 @@ def run_simulation(mode='fedavg', train_data=None, test_loader=None, client_indi
 # --- 6. Main & Argument Parsing ---
 def main():
     parser = argparse.ArgumentParser(description='Federated Learning with Grad-CAM aggregation')
+    # Device detection
+    if torch.cuda.is_available():
+        default_device = 'cuda'
+    elif torch.backends.mps.is_available():
+        default_device = 'mps'
+    else:
+        default_device = 'cpu'
+    
     parser.add_argument('--dataset', type=str, default='stl10', choices=['stl10', 'cifar10'], help='Dataset to use')
     parser.add_argument('--num_clients', type=int, default=4, help='Number of clients')
     parser.add_argument('--distribution', type=str, default='non-iid', choices=['iid', 'non-iid'], help='Data distribution')
@@ -358,11 +385,11 @@ def main():
     parser.add_argument('--epochs', type=int, default=2, help='Local epochs per client')
     parser.add_argument('--batch_size', type=int, default=32, help='Batch size')
     parser.add_argument('--lr', type=float, default=0.01, help='Learning rate')
-    parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu', help='Device to use')
     parser.add_argument('--vis_dir', type=str, default='visualizations', help='Directory for visualizations')
     
     global args
     args = parser.parse_args()
+    args.device = default_device
     args.num_classes = 10 
     args.img_size = 128 if args.dataset == 'stl10' else 32
 
@@ -377,36 +404,33 @@ def main():
     client_indices = partition_data(train_full, targets, args.num_clients, args.distribution, args.alpha, args.num_classes)
     test_loader = DataLoader(test_full, batch_size=args.batch_size)
     
-    # Run FedAvg
-    acc_avg, time_avg = run_simulation('fedavg', train_full, test_loader, client_indices, args)
+    test_loader = DataLoader(test_full, batch_size=args.batch_size)
     
-    # Run FedGradCAM
+    print(f"Running simulation on {args.device}...")
     acc_grad, time_grad = run_simulation('fedgradcam', train_full, test_loader, client_indices, args)
     
-    # Final Comparison Plot
+    # Final Plot
     plt.figure(figsize=(12, 5))
     
     plt.subplot(1, 2, 1)
-    plt.plot(range(1, args.rounds+1), acc_avg, label='FedAvg', marker='o')
-    plt.plot(range(1, args.rounds+1), acc_grad, label='FedGradCAM', marker='s')
+    plt.plot(range(1, args.rounds+1), acc_grad, label='FedGradCAM', marker='s', color='orange')
     plt.xlabel('Round')
     plt.ylabel('F1 Score')
-    plt.title(f'F1 Score Comparison ({args.dataset}, {args.distribution})')
+    plt.title(f'FedGradCAM Performance ({args.dataset}, {args.distribution})')
     plt.legend()
-    plt.grid(True)
+    plt.grid(False)
     
     plt.subplot(1, 2, 2)
-    plt.plot(range(1, args.rounds+1), time_avg, label='FedAvg', marker='o')
-    plt.plot(range(1, args.rounds+1), time_grad, label='FedGradCAM', marker='s')
+    plt.plot(range(1, args.rounds+1), time_grad, label='FedGradCAM', marker='s', color='orange')
     plt.xlabel('Round')
     plt.ylabel('Cumulative Time (s)')
-    plt.title('Training Time Comparison')
+    plt.title('Training Time Progress')
     plt.legend()
-    plt.grid(True)
+    plt.grid(False)
     
-    save_path = f'simulation_comparison_{args.dataset}_{args.distribution}.png'
+    save_path = f'fedgradcam_results_{args.dataset}_{args.distribution}.pdf'
     plt.savefig(save_path)
-    print(f"\nFinal Results saved to {save_path}")
+    print(f"\nResults saved to {save_path}")
 
 if __name__ == "__main__":
     main()
