@@ -17,7 +17,12 @@ import matplotlib.pyplot as plt
 from sklearn.metrics import f1_score
 import logging
 import urllib.request
+import json
+import base64
 logging.getLogger("flwr").setLevel(logging.ERROR)
+
+from captum.attr import visualization as vit
+from fedexp import FedExpStrategy, set_inplace, get_layer_importance
 
 # --- 1. Dataset-Specific Hyperparameters ---
 DATASET_HYPERPARAMS = {
@@ -209,7 +214,50 @@ class FlowerClient(fl.client.NumPyClient):
             epoch_losses.append(sum(batch_losses)/len(batch_losses))
         
         avg_loss = sum(epoch_losses) / len(epoch_losses) if epoch_losses else 0.0
-        return self.get_parameters(config={}), len(self.trainloader.dataset), {"loss": float(avg_loss)}
+
+        # --- FedExp Importance Calculation ---
+        importance_dict = {}
+        # Dynamically find convolutional layers for importance calculation
+        # To avoid being too slow, we focus on the last few layers if many exist
+        conv_layers = []
+        for name, module in self.model.named_modules():
+            if isinstance(module, nn.Conv2d):
+                conv_layers.append((name, module))
+        
+        # Take the last 3 conv layers (standard for pathway refinement)
+        target_layers = conv_layers[-3:] if len(conv_layers) > 3 else conv_layers
+        
+        if target_layers:
+            self.model.eval()
+            set_inplace(self.model, False)
+            
+            for name, layer in target_layers:
+                layer_imp_sum = None
+                count = 0
+                for i, (data, target) in enumerate(self.trainloader):
+                    if i >= 4: break 
+                    data, target = data.to(self.device), target.to(self.device)
+                    
+                    # We only compute for correctly classified samples
+                    with torch.no_grad():
+                        out = self.model(data)
+                        preds = out.argmax(dim=1)
+                        mask = preds == target
+                    
+                    if mask.any():
+                        imp = get_layer_importance(self.model, layer, data[mask], target[mask], self.device)
+                        if layer_imp_sum is None:
+                            layer_imp_sum = imp
+                        else:
+                            layer_imp_sum += imp
+                        count += 1
+                
+                if count > 0:
+                    importance_dict[name] = (layer_imp_sum / count).tolist()
+                else:
+                    importance_dict[name] = [1.0] * layer.out_channels
+
+        return self.get_parameters(config={}), len(self.trainloader.dataset), {"loss": float(avg_loss), "importance": json.dumps(importance_dict)}
 
     def evaluate(self, parameters, config):
         self.set_parameters(parameters)
@@ -234,16 +282,18 @@ class FlowerClient(fl.client.NumPyClient):
 
 class PerformanceTracker:
     def __init__(self):
-        self.round_start_time = 0
+        self.fit_start_time = 0
         self.durations = []
 
-    def start_round(self, server_round: int):
-        self.round_start_time = time.time()
+    def start_fit(self, server_round: int):
+        self.fit_start_time = time.time()
         return {}
 
-    def stop_round_and_aggregate(self, metrics: List[Tuple[int, Dict]]):
-        duration = time.time() - self.round_start_time
-        self.durations.append(duration)
+    def stop_evaluate(self, metrics: List[Tuple[int, Dict]]):
+        # This is where we finalize the round duration
+        if self.fit_start_time > 0:
+            duration = time.time() - self.fit_start_time
+            self.durations.append(duration)
         
         if not metrics:
             return {"accuracy": 0.0}
@@ -270,7 +320,14 @@ def print_experiment_summary(args, device, client_indices, targets, selected_bas
     print("-" * 50)
     
     print("Data Distribution per Client (Label Counts):")
-    label_header = " | ".join([f"L{i}" for i in range(num_classes)])
+    # Truncate label header if too many classes
+    max_labels_to_show = 15
+    if num_classes > max_labels_to_show:
+        labels_to_show = list(range(max_labels_to_show))
+        label_header = " | ".join([f"L{i}" for i in labels_to_show]) + " | ..."
+    else:
+        label_header = " | ".join([f"L{i}" for i in range(num_classes)])
+    
     header = f"Client    | {label_header} | Total"
     print(header)
     print("-" * len(header))
@@ -278,10 +335,15 @@ def print_experiment_summary(args, device, client_indices, targets, selected_bas
     for client_idx in range(len(client_indices)):
         client_targets = targets[client_indices[client_idx]]
         counts = []
-        for label in range(num_classes):
+        limit = min(num_classes, max_labels_to_show)
+        for label in range(limit):
             count = np.sum(client_targets == label)
             counts.append(f"{count:3}")
-        row = f"Client {client_idx:2} | " + " | ".join(counts) + f" | {len(client_targets):4}"
+        
+        row = f"Client {client_idx:2} | " + " | ".join(counts)
+        if num_classes > max_labels_to_show:
+            row += " | ..."
+        row += f" | {len(client_targets):4}"
         print(row)
     print("="*50 + "\n")
 
@@ -297,7 +359,7 @@ STRATEGY_DISPLAY_NAMES = {
     'fedmedian': 'FedMedian',
     'fedtrimmedavg': 'FedTrimmedAvg',
     'faulttolerantfedavg': 'FaultTolerantFedAvg',
-    'fedexp': 'FedExp'
+    #'fedexp': 'FedExp',
 }
 
 # --- 6. Main Simulation ---
@@ -308,7 +370,7 @@ def main():
     parser.add_argument('--model', type=str, default='cnn', choices=['cnn', 'squeezenet', 'shufflenet', 'resnet'])
     parser.add_argument('--num_clients', type=int, default=4)
     parser.add_argument('--rounds', type=int, default=5)
-    parser.add_argument('--epochs', type=int, default=None, help='Local epochs (auto-tuned if None)')
+    parser.add_argument('--epochs', type=int, default=1, help='Local epochs (auto-tuned if None)')
     parser.add_argument('--batch_size', type=int, default=None, help='Batch size (auto-tuned if None)')
     parser.add_argument('--baseline', type=str, nargs='+', default=['fedavg'], 
                         help='Aggregation strategy or "all". Available: ' + ', '.join(STRATEGY_DISPLAY_NAMES.keys()))
@@ -390,8 +452,8 @@ def main():
             "min_fit_clients": args.num_clients,
             "min_evaluate_clients": args.num_clients,
             "min_available_clients": args.num_clients,
-            "on_fit_config_fn": tracker.start_round,
-            "evaluate_metrics_aggregation_fn": tracker.stop_round_and_aggregate,
+            "on_fit_config_fn": tracker.start_fit,
+            "evaluate_metrics_aggregation_fn": tracker.stop_evaluate,
             "initial_parameters": initial_parameters,
         }
 
@@ -414,16 +476,34 @@ def main():
         elif mode == 'fedtrimmedavg':
             strategy = fl.server.strategy.FedTrimmedAvg(**common_params)
         elif mode == 'fedexp':
-            strategy = fl.server.strategy.FedAvg(**common_params)
+            m_params = {
+                'name': args.model,
+                'num_classes': num_classes,
+                'input_size': img_size,
+                'in_channels': in_channels,
+                'dataset_name': args.dataset
+            }
+            strategy = FedExpStrategy(test_set=test_set, device=device, model_params=m_params, **common_params)
         else:
             print(f"Skipping unknown baseline: {mode}")
             continue
+        
+        # Define client resources for simulation
+        # Use a fraction of a CPU to allow higher parallelism on limited hardware
+        client_resources = {"num_cpus": 0.5} 
+        
+        if device == "cuda":
+            # On NVIDIA, Ray tracks GPUs, so we can share the physical device
+            client_resources["num_gpus"] = 1.0 / args.num_clients
+        # Note: on MacOS (MPS), Ray does NOT see the GPU as a standard resource.
+        # We don't set num_gpus here; PyTorch will still use MPS internally.
         
         history = fl.simulation.start_simulation(
             client_fn=client_fn,
             num_clients=args.num_clients,
             config=fl.server.ServerConfig(num_rounds=args.rounds),
             strategy=strategy,
+            client_resources=client_resources,
         )
         
         if "accuracy" in history.metrics_distributed:

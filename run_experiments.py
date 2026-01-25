@@ -8,7 +8,7 @@ DATASETS = ['cifar10', 'stl10', 'mnist', 'oxfordpet']
 MODELS = ['cnn', 'squeezenet', 'shufflenet', 'resnet']
 NUM_CLIENTS = 2
 DATA_DISTR = 0.5
-DEFAULT_ROUNDS = 100
+DEFAULT_ROUNDS = 10
 DEFAULT_EPOCHS = 1
 DEFAULT_BASELINE = ['all']
 
