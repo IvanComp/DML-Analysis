@@ -6,11 +6,11 @@ import os
 # Configuration
 DATASETS = ['cifar10', 'stl10', 'mnist', 'oxfordpet']
 MODELS = ['cnn', 'squeezenet', 'shufflenet', 'resnet']
-NUM_CLIENTS = 20
+NUM_CLIENTS = 2
 DATA_DISTR = 0.5
-DEFAULT_ROUNDS = 5
+DEFAULT_ROUNDS = 100
 DEFAULT_EPOCHS = 1
-DEFAULT_BASELINE = ['fedavg']
+DEFAULT_BASELINE = ['all']
 
 def run_experiment(dataset, model, baseline, rounds, epochs, num_clients, data_distr):
     command = [

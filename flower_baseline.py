@@ -215,8 +215,8 @@ class FlowerClient(fl.client.NumPyClient):
         self.set_parameters(parameters)
         self.model.eval()
         criterion = nn.CrossEntropyLoss()
-        all_preds = []
-        all_targets = []
+        correct = 0
+        total = 0
         loss = 0.0
         with torch.no_grad():
             for data, target in self.valloader:
@@ -224,11 +224,11 @@ class FlowerClient(fl.client.NumPyClient):
                 outputs = self.model(data)
                 loss += criterion(outputs, target).item()
                 _, predicted = torch.max(outputs.data, 1)
-                all_preds.extend(predicted.cpu().numpy())
-                all_targets.extend(target.cpu().numpy())
+                total += target.size(0)
+                correct += (predicted == target).sum().item()
         
-        f1 = f1_score(all_targets, all_preds, average='weighted', zero_division=0)
-        return float(loss) / len(self.valloader), len(self.valloader.dataset), {"f1_score": float(f1)}
+        acc = correct / total if total > 0 else 0
+        return float(loss) / len(self.valloader), len(self.valloader.dataset), {"accuracy": float(acc)}
 
 # --- 3. Performance Tracker ---
 
@@ -246,11 +246,11 @@ class PerformanceTracker:
         self.durations.append(duration)
         
         if not metrics:
-            return {"f1_score": 0.0}
+            return {"accuracy": 0.0}
             
-        f1s = [num_examples * m["f1_score"] for num_examples, m in metrics]
+        accs = [num_examples * m["accuracy"] for num_examples, m in metrics]
         examples = [num_examples for num_examples, _ in metrics]
-        return {"f1_score": sum(f1s) / sum(examples)}
+        return {"accuracy": sum(accs) / sum(examples)}
 
 # --- 4. Utilities ---
 
@@ -259,14 +259,14 @@ def print_experiment_summary(args, device, client_indices, targets, selected_bas
     print("      EXPERIMENT CONFIGURATION SUMMARY")
     print("="*50)
     print(f"Dataset:       {args.dataset.upper()}")
-    print(f"Processing Unit:        {device.upper()}")
+    print(f"Process Unit:  {device.upper()}")
     print(f"Rounds:        {args.rounds}")
     print(f"Local Epochs:  {args.epochs}")
     print(f"Batch Size:    {args.batch_size}")
     print(f"Num Clients:   {args.num_clients}")
     print(f"Data Distr:    Alpha={args.data_distr} ({'IID' if args.data_distr >= 1.0 else 'Non-IID'})")
     print(f"Baselines:     {', '.join([STRATEGY_DISPLAY_NAMES.get(b, b) for b in selected_baselines])}")
-    print(f"Model Architecture:     {args.model}")
+    print(f"Model:         {args.model}")
     print("-" * 50)
     
     print("Data Distribution per Client (Label Counts):")
@@ -426,31 +426,31 @@ def main():
             strategy=strategy,
         )
         
-        if "f1_score" in history.metrics_distributed:
-            history_f1 = [val for _, val in history.metrics_distributed["f1_score"]]
-            all_metric_results[display_name] = history_f1
+        if "accuracy" in history.metrics_distributed:
+            history_acc = [val for _, val in history.metrics_distributed["accuracy"]]
+            all_metric_results[display_name] = history_acc
             all_time_results[display_name] = tracker.durations
             
         # Log to CSV
         csv_path = f'csv/baseline_{mode}_{args.dataset}.csv'
         with open(csv_path, 'w', newline='') as f:
             writer = csv.writer(f)
-            writer.writerow(['Round', 'F1_Score', 'Duration_Sec', 'Clients', 'Epochs', 'Model', 'Dataset'])
-            for r in range(len(history_f1)):
+            writer.writerow(['Round', 'Accuracy', 'Duration_Sec', 'Clients', 'Epochs', 'Model', 'Dataset'])
+            for r in range(len(history_acc)):
                 dur = tracker.durations[r] if r < len(tracker.durations) else 0.0
                 model_name = args.model
-                writer.writerow([r+1, history_f1[r], dur, args.num_clients, args.epochs, model_name, args.dataset])
+                writer.writerow([r+1, history_acc[r], dur, args.num_clients, args.epochs, model_name, args.dataset])
         print(f"Log saved to {csv_path}")
 
     # Plotting (Separated)
     if all_metric_results:
-        # 1. F1 Score Plot
+        # 1. Accuracy Plot
         plt.figure(figsize=(10, 6))
         for display_name in all_metric_results.keys():
             plt.plot(range(1, len(all_metric_results[display_name]) + 1), all_metric_results[display_name], label=display_name, marker='o')
         plt.xlabel('Round')
-        plt.ylabel('Weighted F1 Score')
-        plt.title(f'F1 Score Comparison - {args.dataset}')
+        plt.ylabel('Testing Accuracy')
+        plt.title(f'Accuracy Comparison - {args.dataset}')
         plt.legend()
         plt.grid(False)
         acc_filename = f"accuracy_{baseline_name_for_file}_{args.model}_{args.num_clients}Clients.pdf"

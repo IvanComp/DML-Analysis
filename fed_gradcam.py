@@ -247,19 +247,18 @@ def save_visualization(model, loader, client_id, round_id, img_size, dataset_nam
 
 def evaluate(model, loader):
     model.eval()
-    all_preds = []
-    all_targets = []
+    correct = 0
+    total = 0
     with torch.no_grad():
         for data, target in loader:
             data, target = data.to(args.device), target.to(args.device)
             outputs = model(data)
             _, predicted = torch.max(outputs.data, 1)
-            all_preds.extend(predicted.cpu().numpy())
-            all_targets.extend(target.cpu().numpy())
+            total += target.size(0)
+            correct += (predicted == target).sum().item()
     
-    # Calculate weighted F1 score
-    f1 = f1_score(all_targets, all_preds, average='weighted', zero_division=0)
-    return f1
+    accuracy = correct / total if total > 0 else 0
+    return accuracy
 
 def aggregate_weights(global_model, local_weights_list, method='fedavg', importances=None, round_id=0, num_clients=4):
     new_state = copy.deepcopy(global_model.state_dict())
@@ -356,13 +355,13 @@ def run_simulation(mode='fedavg', train_data=None, test_loader=None, client_indi
         global_model.load_state_dict(new_weights)
         
         # Metric
-        f1_val = evaluate(global_model, test_loader)
-        acc_history.append(f1_val)
+        acc_val = evaluate(global_model, test_loader)
+        acc_history.append(acc_val)
         
         elapsed = time.time() - start_time
         time_history.append(elapsed)
         
-        print(f"[{mode}] Round {r+1} F1: {f1_val:.4f} | Time: {elapsed:.1f}s")
+        print(f"[{mode}] Round {r+1} Accuracy: {acc_val:.4f} | Time: {elapsed:.1f}s")
         
     return acc_history, time_history
 
@@ -415,7 +414,7 @@ def main():
     plt.subplot(1, 2, 1)
     plt.plot(range(1, args.rounds+1), acc_grad, label='FedGradCAM', marker='s', color='orange')
     plt.xlabel('Round')
-    plt.ylabel('F1 Score')
+    plt.ylabel('Testing Accuracy')
     plt.title(f'FedGradCAM Performance ({args.dataset}, {args.distribution})')
     plt.legend()
     plt.grid(False)
