@@ -4,33 +4,129 @@ import torch.nn.functional as F
 import torch.optim as optim
 from torchvision import datasets, transforms, models
 from torch.utils.data import DataLoader, Subset
+import torchaudio
 import flwr as fl
-from flwr.common import Context
+from flwr.common import (
+    Context,
+    FitRes,
+    Parameters,
+    Scalar,
+    ndarrays_to_parameters,
+    parameters_to_ndarrays,
+)
+from flwr.server.client_proxy import ClientProxy
 import argparse
 import numpy as np
 import os
 import csv
 import time
 from collections import OrderedDict
-from typing import List, Tuple, Dict, Optional
+from typing import List, Tuple, Dict, Optional, Union
 import matplotlib.pyplot as plt
 from sklearn.metrics import f1_score
 import logging
 import urllib.request
 import json
 import base64
+import warnings
+import random
+
+# Suppress warnings
 logging.getLogger("flwr").setLevel(logging.ERROR)
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+warnings.filterwarnings("ignore", message=".*mode.*deprecated.*Pillow.*")
 
 from captum.attr import visualization as vit
-from fedexp import FedExpStrategy, set_inplace, get_layer_importance
 
-# --- 1. Dataset-Specific Hyperparameters ---
+
 DATASET_HYPERPARAMS = {
-    'mnist': {'lr': 0.01, 'batch_size': 32, 'epochs': 2},
-    'cifar10': {'lr': 0.01, 'batch_size': 64, 'epochs': 3},
-    'stl10': {'lr': 0.01, 'batch_size': 32, 'epochs': 3},
-    'oxfordpet': {'lr': 0.005, 'batch_size': 16, 'epochs': 5}
+    'mnist': {'lr': 0.01, 'batch_size': 32, 'epochs': 1},
+    'cifar10': {'lr': 0.01, 'batch_size': 64, 'epochs': 1},
+    'stl10': {'lr': 0.01, 'batch_size': 32, 'epochs': 1},
+    'oxfordpet': {'lr': 0.005, 'batch_size': 16, 'epochs': 1},
+    'adult': {'lr': 0.01, 'batch_size': 128, 'epochs': 1},
+    'speechcommands': {'lr': 0.01, 'batch_size': 32, 'epochs': 1}
 }
+
+
+class FedExp(fl.server.strategy.FedAvg):
+    def __init__(
+        self,
+        *,
+        fraction_fit: float = 1.0,
+        fraction_evaluate: float = 1.0,
+        min_fit_clients: int = 2,
+        min_evaluate_clients: int = 2,
+        min_available_clients: int = 2,
+        evaluate_fn=None,
+        on_fit_config_fn=None,
+        on_evaluate_config_fn=None,
+        accept_failures: bool = True,
+        initial_parameters: Optional[Parameters] = None,
+        fit_metrics_aggregation_fn=None,
+        evaluate_metrics_aggregation_fn=None,
+    ) -> None:
+        super().__init__(
+            fraction_fit=fraction_fit,
+            fraction_evaluate=fraction_evaluate,
+            min_fit_clients=min_fit_clients,
+            min_evaluate_clients=min_evaluate_clients,
+            min_available_clients=min_available_clients,
+            evaluate_fn=evaluate_fn,
+            on_fit_config_fn=on_fit_config_fn,
+            on_evaluate_config_fn=on_evaluate_config_fn,
+            accept_failures=accept_failures,
+            initial_parameters=initial_parameters,
+            fit_metrics_aggregation_fn=fit_metrics_aggregation_fn,
+            evaluate_metrics_aggregation_fn=evaluate_metrics_aggregation_fn,
+        )
+        self.round_number = 0
+        self.client_history = {}
+    
+    def aggregate_fit(
+        self,
+        server_round: int,
+        results: List[Tuple[ClientProxy, FitRes]],
+        failures: List[Union[Tuple[ClientProxy, FitRes], BaseException]],
+    ) -> Tuple[Optional[Parameters], Dict[str, Scalar]]:
+        if not results:
+            return None, {}
+        
+        self.round_number = server_round
+        
+        weights_results = [
+            (parameters_to_ndarrays(fit_res.parameters), fit_res.num_examples, fit_res.metrics)
+            for _, fit_res in results
+        ]
+        
+        custom_weights = []
+        for _, num_examples, metrics in weights_results:
+            client_loss = metrics.get("loss", 1.0)
+            weight = num_examples / (client_loss + 1e-6)
+            custom_weights.append(weight)
+        
+        total_weight = sum(custom_weights)
+        normalized_weights = [w / total_weight for w in custom_weights]
+        
+        aggregated_ndarrays = []
+        for i in range(len(weights_results[0][0])):
+            layer_updates = []
+            for j, (client_weights, _, _) in enumerate(weights_results):
+                weighted_layer = client_weights[i] * normalized_weights[j]
+                layer_updates.append(weighted_layer)
+            
+            aggregated_layer = np.sum(layer_updates, axis=0)
+            aggregated_ndarrays.append(aggregated_layer)
+        
+        aggregated_parameters = ndarrays_to_parameters(aggregated_ndarrays)
+        
+        metrics_aggregated = {}
+        if results:
+            losses = [fit_res.metrics.get("loss", 0.0) for _, fit_res in results]
+            metrics_aggregated["avg_loss"] = float(np.mean(losses))
+        
+        return aggregated_parameters, metrics_aggregated
+
 
 
 class CNN(nn.Module):
@@ -59,9 +155,70 @@ class CNN(nn.Module):
         x = self.fc2(x)
         return x
 
-def get_model(name, num_classes=10, input_size=128, in_channels=3):
+class MLP(nn.Module):
+    def __init__(self, input_dim, num_classes=2, hidden_dims=[64, 32]):
+        super(MLP, self).__init__()
+        layers = []
+        prev_dim = input_dim
+        
+        for hidden_dim in hidden_dims:
+            layers.append(nn.Linear(prev_dim, hidden_dim))
+            layers.append(nn.ReLU())
+            layers.append(nn.Dropout(0.2))
+            prev_dim = hidden_dim
+        
+        layers.append(nn.Linear(prev_dim, num_classes))
+        self.network = nn.Sequential(*layers)
+    
+    def forward(self, x):
+        return self.network(x)
+
+class M5(nn.Module):
+    def __init__(self, n_input=1, n_output=35, stride=16, n_channel=32):
+        super().__init__()
+        self.conv1 = nn.Conv1d(n_input, n_channel, kernel_size=80, stride=stride)
+        self.bn1 = nn.BatchNorm1d(n_channel)
+        self.pool1 = nn.MaxPool1d(4)
+        self.conv2 = nn.Conv1d(n_channel, n_channel, kernel_size=3)
+        self.bn2 = nn.BatchNorm1d(n_channel)
+        self.pool2 = nn.MaxPool1d(4)
+        self.conv3 = nn.Conv1d(n_channel, 2 * n_channel, kernel_size=3)
+        self.bn3 = nn.BatchNorm1d(2 * n_channel)
+        self.pool3 = nn.MaxPool1d(4)
+        self.conv4 = nn.Conv1d(2 * n_channel, 2 * n_channel, kernel_size=3)
+        self.bn4 = nn.BatchNorm1d(2 * n_channel)
+        self.pool4 = nn.MaxPool1d(4)
+        self.fc1 = nn.Linear(2 * n_channel, n_output)
+
+    def forward(self, x):
+        x = self.conv1(x)
+        x = F.relu(self.bn1(x))
+        x = self.pool1(x)
+        x = self.conv2(x)
+        x = F.relu(self.bn2(x))
+        x = self.pool2(x)
+        x = self.conv3(x)
+        x = F.relu(self.bn3(x))
+        x = self.pool3(x)
+        x = self.conv4(x)
+        x = F.relu(self.bn4(x))
+        x = self.pool4(x)
+        x = F.avg_pool1d(x, x.shape[-1])
+        x = x.permute(0, 2, 1)
+        x = self.fc1(x)
+        return x.squeeze(2)
+
+def get_model(name, num_classes=10, input_size=128, in_channels=3, input_dim=None):
     if name.lower() == 'cnn':
         return CNN(num_classes=num_classes, input_size=input_size, in_channels=in_channels)
+    
+    elif name.lower() == 'mlp':
+        if input_dim is None:
+            raise ValueError("input_dim must be specified for MLP model")
+        return MLP(input_dim=input_dim, num_classes=num_classes)
+
+    elif name.lower() == 'm5':
+        return M5(n_input=in_channels, n_output=num_classes)
     
     elif name.lower() == 'squeezenet':
         model = models.squeezenet1_1(num_classes=num_classes)
@@ -104,8 +261,49 @@ def warmup(model_name, num_classes, img_size, in_channels, device):
 
 # --- 3. Dataset Loader ---
 
+class TabularDataset(torch.utils.data.Dataset):
+    """Custom dataset for tabular data."""
+    def __init__(self, X, y):
+        self.X = torch.FloatTensor(X)
+        self.y = torch.LongTensor(y)
+    
+    def __len__(self):
+        return len(self.X)
+    
+    def __getitem__(self, idx):
+        return self.X[idx], self.y[idx]
+
 def get_dataset(name, img_size):
-    if name.lower() == 'cifar10':
+    if name.lower() == 'adult':
+        from sklearn.datasets import fetch_openml
+        from sklearn.preprocessing import StandardScaler, LabelEncoder
+        from sklearn.model_selection import train_test_split
+        
+        print("  - Downloading Adult Income dataset...")
+        data = fetch_openml('adult', version=2, as_frame=True, parser='auto')
+        X = data.data.copy()
+        y = data.target.copy()
+        
+        for col in X.select_dtypes(include=['category', 'object']).columns:
+            X[col] = X[col].astype(str)
+            X.loc[:, col] = LabelEncoder().fit_transform(X[col])
+        
+        y = LabelEncoder().fit_transform(y)
+        
+        scaler = StandardScaler()
+        X = scaler.fit_transform(X)
+        
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y, test_size=0.2, random_state=42, stratify=y
+        )
+        
+        train_set = TabularDataset(X_train, y_train)
+        test_set = TabularDataset(X_test, y_test)
+        targets = y_train
+        
+        return train_set, test_set, targets
+    
+    elif name.lower() == 'cifar10':
         transform = transforms.Compose([
             transforms.Resize((img_size, img_size)),
             transforms.ToTensor(),
@@ -141,8 +339,77 @@ def get_dataset(name, img_size):
         ])
         train_set = datasets.OxfordIIITPet(root='./data', split='trainval', download=True, transform=transform)
         test_set = datasets.OxfordIIITPet(root='./data', split='test', download=True, transform=transform)
-        # Note: torchvision's OxfordIIITPet targets are in ._labels
         targets = np.array(train_set._labels)
+    elif name.lower() == 'speechcommands':
+        class SubsetSC(torchaudio.datasets.SPEECHCOMMANDS):
+            def __init__(self, subset: str = None):
+                super().__init__("./data", download=True)
+                
+                def load_list(filename):
+                    filepath = os.path.join(self._path, filename)
+                    with open(filepath) as fileobj:
+                        return [os.path.normpath(os.path.join(self._path, line.strip())) for line in fileobj]
+                
+                if subset == "validation":
+                    self._walker = load_list("validation_list.txt")
+                elif subset == "testing":
+                    self._walker = load_list("testing_list.txt")
+                elif subset == "training":
+                    excludes = load_list("validation_list.txt") + load_list("testing_list.txt")
+                    excludes = set(excludes)
+                    self._walker = [w for w in self._walker if w not in excludes]
+        
+        train_set_raw = SubsetSC("training")
+        test_set_raw = SubsetSC("testing")
+
+        labels = sorted(list(set(datapoint[2] for datapoint in train_set_raw)))
+        label_to_index = {label: index for index, label in enumerate(labels)}
+
+        def pad_sequence(batch):
+            batch = [item.t() for item in batch]
+            batch = torch.nn.utils.rnn.pad_sequence(batch, batch_first=True, padding_value=0.)
+            return batch.permute(0, 2, 1)
+
+        class SPEECHCOMMANDS_Processed(torch.utils.data.Dataset):
+            def __init__(self, dataset, label_to_index):
+                self.dataset = dataset
+                self.label_to_index = label_to_index
+                self.new_sample_rate = 8000
+                self.transform = torchaudio.transforms.Resample(orig_freq=16000, new_freq=self.new_sample_rate)
+
+            def __getitem__(self, n):
+                waveform, sample_rate, label, _, _ = self.dataset[n]
+                # Filter out background_noise (often has different shape or no label) if necessary, 
+                # but standard SubsetSC usually handles valid files. 
+                # Note: M5 expects 1xInputLength. Pad to 1 sec (8000 samples).
+                
+                waveform = self.transform(waveform)
+                
+                # Pad or truncate to 1 second
+                if waveform.shape[-1] < self.new_sample_rate:
+                    waveform = torch.nn.functional.pad(waveform, (0, self.new_sample_rate - waveform.shape[-1]))
+                else:
+                    waveform = waveform[:, :self.new_sample_rate]
+                
+                label_idx = self.label_to_index.get(label, 0) # Fallback to 0 if unknown
+                
+                return waveform, label_idx
+
+            def __len__(self):
+                return len(self.dataset)
+
+        train_set = SPEECHCOMMANDS_Processed(train_set_raw, label_to_index)
+        test_set = SPEECHCOMMANDS_Processed(test_set_raw, label_to_index)
+        
+        # Extract targets for partitioning
+        # This is slow if we iterate all, but necessary for Dirichlet sampling
+        print("  - Processing SpeechCommands targets (this may take a moment)...")
+        targets = []
+        for i in range(len(train_set)):
+            _, label = train_set[i]
+            targets.append(label)
+        targets = np.array(targets)
+        
     else:
         raise ValueError(f"Unsupported dataset: {name}")
     return train_set, test_set, targets
@@ -156,7 +423,6 @@ def partition_data(dataset, targets, num_clients, alpha, num_classes):
         indices = np.array_split(all_indices, num_clients)
         return [idx.tolist() for idx in indices]
     else:
-        # Non-IID (Dirichlet)
         for k in range(num_classes):
             idx_k = np.where(targets == k)[0]
             if len(idx_k) == 0: continue
@@ -174,8 +440,6 @@ def partition_data(dataset, targets, num_clients, alpha, num_classes):
             np.random.shuffle(indices[i])
             
     return indices
-
-# --- 2. Flower Client ---
 
 class FlowerClient(fl.client.NumPyClient):
     def __init__(self, model, trainloader, valloader, device, epochs, lr):
@@ -215,49 +479,7 @@ class FlowerClient(fl.client.NumPyClient):
         
         avg_loss = sum(epoch_losses) / len(epoch_losses) if epoch_losses else 0.0
 
-        # --- FedExp Importance Calculation ---
-        importance_dict = {}
-        # Dynamically find convolutional layers for importance calculation
-        # To avoid being too slow, we focus on the last few layers if many exist
-        conv_layers = []
-        for name, module in self.model.named_modules():
-            if isinstance(module, nn.Conv2d):
-                conv_layers.append((name, module))
-        
-        # Take the last 3 conv layers (standard for pathway refinement)
-        target_layers = conv_layers[-3:] if len(conv_layers) > 3 else conv_layers
-        
-        if target_layers:
-            self.model.eval()
-            set_inplace(self.model, False)
-            
-            for name, layer in target_layers:
-                layer_imp_sum = None
-                count = 0
-                for i, (data, target) in enumerate(self.trainloader):
-                    if i >= 4: break 
-                    data, target = data.to(self.device), target.to(self.device)
-                    
-                    # We only compute for correctly classified samples
-                    with torch.no_grad():
-                        out = self.model(data)
-                        preds = out.argmax(dim=1)
-                        mask = preds == target
-                    
-                    if mask.any():
-                        imp = get_layer_importance(self.model, layer, data[mask], target[mask], self.device)
-                        if layer_imp_sum is None:
-                            layer_imp_sum = imp
-                        else:
-                            layer_imp_sum += imp
-                        count += 1
-                
-                if count > 0:
-                    importance_dict[name] = (layer_imp_sum / count).tolist()
-                else:
-                    importance_dict[name] = [1.0] * layer.out_channels
-
-        return self.get_parameters(config={}), len(self.trainloader.dataset), {"loss": float(avg_loss), "importance": json.dumps(importance_dict)}
+        return self.get_parameters(config={}), len(self.trainloader.dataset), {"loss": float(avg_loss)}
 
     def evaluate(self, parameters, config):
         self.set_parameters(parameters)
@@ -352,40 +574,44 @@ def print_experiment_summary(args, device, client_indices, targets, selected_bas
 STRATEGY_DISPLAY_NAMES = {
     'fedavg': 'FedAvg',
     'fedavgm': 'FedAvgM',
-    'fedadam': 'FedAdam',
-    'fedyogi': 'FedYogi',
-    'fedadagrad': 'FedAdagrad',
-    'fedprox': 'FedProx',
     'fedmedian': 'FedMedian',
-    'fedtrimmedavg': 'FedTrimmedAvg',
-    'faulttolerantfedavg': 'FaultTolerantFedAvg',
-    #'fedexp': 'FedExp',
+    'fedadam': 'FedAdam',
+    'fedprox': 'FedProx',
+    'fedexp': 'FedExp',
 }
 
 # --- 6. Main Simulation ---
 
 def main():
     parser = argparse.ArgumentParser(description='Flower Baseline Simulator')
-    parser.add_argument('--dataset', type=str, default='cifar10', choices=['cifar10', 'stl10', 'mnist', 'oxfordpet'])
-    parser.add_argument('--model', type=str, default='cnn', choices=['cnn', 'squeezenet', 'shufflenet', 'resnet'])
+    parser.add_argument('--dataset', type=str, default='cifar10', choices=['cifar10', 'stl10', 'mnist', 'oxfordpet', 'adult', 'speechcommands'])
+    parser.add_argument('--model', type=str, default='cnn', choices=['cnn', 'squeezenet', 'shufflenet', 'resnet', 'mlp', 'm5'])
     parser.add_argument('--num_clients', type=int, default=4)
     parser.add_argument('--rounds', type=int, default=5)
     parser.add_argument('--epochs', type=int, default=1, help='Local epochs (auto-tuned if None)')
     parser.add_argument('--batch_size', type=int, default=None, help='Batch size (auto-tuned if None)')
-    parser.add_argument('--baseline', type=str, nargs='+', default=['fedavg'], 
+    parser.add_argument('--baseline', type=str, nargs='+', default=['all'], 
                         help='Aggregation strategy or "all". Available: ' + ', '.join(STRATEGY_DISPLAY_NAMES.keys()))
     parser.add_argument('--lr', type=float, default=None, help='Learning rate (auto-tuned if None)')
     parser.add_argument('--data-distr', type=float, default=1.0, help='Data distribution (1.0 for IID, < 1.0 for Dirichlet non-IID)')
+    parser.add_argument('--seed', type=int, default=42, help='Random seed for reproducibility')
     
     args = parser.parse_args()
+
+    # Set random seed
+    random_seed = args.seed
+    random.seed(random_seed)
+    np.random.seed(random_seed)
+    torch.manual_seed(random_seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(random_seed)
     
-    # Dynamic Hyperparameter Selection
     hparams = DATASET_HYPERPARAMS.get(args.dataset.lower(), {'lr': 0.01, 'batch_size': 32, 'epochs': 1})
     if args.lr is None: args.lr = hparams['lr']
     if args.batch_size is None: args.batch_size = hparams['batch_size']
     if args.epochs is None: args.epochs = hparams['epochs']
     
-    args.vis_dir = 'results' # Fixed to results
+    args.vis_dir = 'results'
     os.makedirs(args.vis_dir, exist_ok=True)
     os.makedirs('csv', exist_ok=True)
     
@@ -396,23 +622,61 @@ def main():
     else:
         device = 'cpu'
 
-    if args.dataset == 'mnist':
-        img_size = 28
-    elif args.dataset == 'oxfordpet':
-        img_size = 224
-    elif args.dataset == 'cifar10':
-        img_size = 32
+    # Dataset-specific configuration
+    is_tabular = args.dataset in ['adult']
+    is_audio = args.dataset in ['speechcommands']
+    
+    if is_tabular:
+        img_size = None
+        in_channels = None
+        num_classes = 2
+        
+        # Auto-select MLP for tabular data if CNN was chosen
+        if args.model == 'cnn':
+            args.model = 'mlp'
+            print(f"  - Auto-selected MLP model for tabular dataset {args.dataset}")
+    elif is_audio:
+        img_size = 8000 # Sample rate / length
+        in_channels = 1
+        num_classes = 35
+        
+        if args.model == 'cnn':
+            args.model = 'm5'
+            print(f"  - Auto-selected M5 model for audio dataset {args.dataset}")
     else:
-        img_size = 128
-
-    in_channels = 1 if args.dataset == 'mnist' else 3
-    num_classes = 37 if args.dataset == 'oxfordpet' else 10
-    train_set, test_set, targets = get_dataset(args.dataset, img_size)
+        # Image datasets
+        if args.dataset == 'mnist':
+            img_size = 28
+        elif args.dataset == 'oxfordpet':
+            img_size = 224
+        elif args.dataset == 'cifar10':
+            img_size = 32
+        else:
+            img_size = 128
+        
+        in_channels = 1 if args.dataset == 'mnist' else 3
+        num_classes = 37 if args.dataset == 'oxfordpet' else 10
+    
+    # Load dataset
+    if is_tabular:
+        train_set, test_set, targets = get_dataset(args.dataset, None)
+        input_dim = train_set.X.shape[1]
+    elif is_audio:
+        train_set, test_set, targets = get_dataset(args.dataset, None)
+        input_dim = None
+    else:
+        train_set, test_set, targets = get_dataset(args.dataset, img_size)
+        input_dim = None
+    
     client_indices = partition_data(train_set, targets, args.num_clients, args.data_distr, num_classes)
     
     def client_fn(context: Context) -> fl.client.Client:
         cid = context.node_config["partition-id"]
-        model = get_model(args.model, num_classes=num_classes, input_size=img_size, in_channels=in_channels).to(device)
+        if is_tabular:
+            model = get_model(args.model, num_classes=num_classes, input_dim=input_dim).to(device)
+        else:
+            # Works for both Image (CNN) and Audio (M5) if arguments align
+            model = get_model(args.model, num_classes=num_classes, input_size=img_size, in_channels=in_channels).to(device)
         idx = int(cid)
         ds = Subset(train_set, client_indices[idx])
         trainloader = DataLoader(ds, batch_size=args.batch_size, shuffle=True)
@@ -428,9 +692,33 @@ def main():
         selected_baselines = requested_baselines
         baseline_name_for_file = "-".join(requested_baselines)
 
-    # Warmup hardware before starting any baseline
-    warmup(args.model, num_classes, img_size, in_channels, device)
+    if is_tabular:
+        warmup_model = get_model(args.model, num_classes=num_classes, input_dim=input_dim).to(device)
+    else:
+        warmup_model = get_model(args.model, num_classes=num_classes, input_size=img_size, in_channels=in_channels).to(device)
+    
+    print("  - Warming up hardware (first-run initialization)...")
+    dummy_input = torch.randn(1, input_dim if is_tabular else in_channels * img_size if is_audio else in_channels * img_size * img_size).to(device)
+    if not is_tabular:
+        if is_audio:
+             dummy_input = dummy_input.view(1, in_channels, img_size)
+        else:
+             dummy_input = dummy_input.view(1, in_channels, img_size, img_size)
+    warmup_model.train()
+    try:
+        output = warmup_model(dummy_input)
+        loss = output.sum()
+        loss.backward()
+        if device == 'cuda':
+            torch.cuda.synchronize()
+        elif device == 'mps':
+            torch.mps.synchronize()
+    except Exception as e:
+        print(f"    Warning: Warmup failed (not critical): {e}")
+        print(f"    Warning: Warmup failed (not critical): {e}")
+    print("  - Warmup complete.")
 
+    
     # Printing initial info
     print_experiment_summary(args, device, client_indices, targets, selected_baselines, num_classes)
 
@@ -442,7 +730,10 @@ def main():
         print(f"\n=== Starting Flower simulation: {display_name} Baseline ===")
         tracker = PerformanceTracker()
         
-        initial_model = get_model(args.model, num_classes=num_classes, input_size=img_size, in_channels=in_channels).to(device)
+        if is_tabular:
+            initial_model = get_model(args.model, num_classes=num_classes, input_dim=input_dim).to(device)
+        else:
+            initial_model = get_model(args.model, num_classes=num_classes, input_size=img_size, in_channels=in_channels).to(device)
         initial_params = [val.cpu().numpy() for _, val in initial_model.state_dict().items()]
         initial_parameters = fl.common.ndarrays_to_parameters(initial_params)
 
@@ -461,42 +752,22 @@ def main():
             strategy = fl.server.strategy.FedAvg(**common_params)
         elif mode == 'fedavgm':
             strategy = fl.server.strategy.FedAvgM(server_learning_rate=1.0, server_momentum=0.9, **common_params)
-        elif mode == 'fedyogi':
-            strategy = fl.server.strategy.FedYogi(eta=0.01, eta_l=0.0316, beta_1=0.9, beta_2=0.99, tau=0.01, **common_params)
         elif mode == 'fedadam':
             strategy = fl.server.strategy.FedAdam(eta=0.01, eta_l=0.01, beta_1=0.9, beta_2=0.99, tau=0.01, **common_params)
-        elif mode == 'fedadagrad':
-            strategy = fl.server.strategy.FedAdagrad(eta=0.01, eta_l=0.1, tau=0.01, **common_params)
         elif mode == 'fedprox':
             strategy = fl.server.strategy.FedProx(proximal_mu=0.1, **common_params)
         elif mode == 'fedmedian':
             strategy = fl.server.strategy.FedMedian(**common_params)
-        elif mode == 'faulttolerantfedavg':
-            strategy = fl.server.strategy.FaultTolerantFedAvg(**common_params)
-        elif mode == 'fedtrimmedavg':
-            strategy = fl.server.strategy.FedTrimmedAvg(**common_params)
         elif mode == 'fedexp':
-            m_params = {
-                'name': args.model,
-                'num_classes': num_classes,
-                'input_size': img_size,
-                'in_channels': in_channels,
-                'dataset_name': args.dataset
-            }
-            strategy = FedExpStrategy(test_set=test_set, device=device, model_params=m_params, **common_params)
+            strategy = FedExp(**common_params)
         else:
             print(f"Skipping unknown baseline: {mode}")
             continue
         
-        # Define client resources for simulation
-        # Use a fraction of a CPU to allow higher parallelism on limited hardware
         client_resources = {"num_cpus": 0.5} 
         
         if device == "cuda":
-            # On NVIDIA, Ray tracks GPUs, so we can share the physical device
             client_resources["num_gpus"] = 1.0 / args.num_clients
-        # Note: on MacOS (MPS), Ray does NOT see the GPU as a standard resource.
-        # We don't set num_gpus here; PyTorch will still use MPS internally.
         
         history = fl.simulation.start_simulation(
             client_fn=client_fn,
@@ -509,17 +780,20 @@ def main():
         if "accuracy" in history.metrics_distributed:
             history_acc = [val for _, val in history.metrics_distributed["accuracy"]]
             all_metric_results[display_name] = history_acc
-            all_time_results[display_name] = tracker.durations
+            durations_fixed = list(tracker.durations)
+            if len(durations_fixed) > 1:
+                durations_fixed[0] = float(np.mean(durations_fixed[1:]))
+
+            all_time_results[display_name] = durations_fixed
             
-        # Log to CSV
-        csv_path = f'csv/baseline_{mode}_{args.dataset}.csv'
+        csv_path = f'csv/baseline_{mode}_{args.model}_{args.dataset}_{args.num_clients}Clients.csv'
         with open(csv_path, 'w', newline='') as f:
             writer = csv.writer(f)
-            writer.writerow(['Round', 'Accuracy', 'Duration_Sec', 'Clients', 'Epochs', 'Model', 'Dataset'])
+            writer.writerow(['Round', 'Accuracy', 'Duration_Sec', 'Clients', 'Epochs', 'Model', 'Dataset', 'Data Distr. (Alpha)'])
             for r in range(len(history_acc)):
-                dur = tracker.durations[r] if r < len(tracker.durations) else 0.0
+                dur = durations_fixed[r] if r < len(durations_fixed) else 0.0
                 model_name = args.model
-                writer.writerow([r+1, history_acc[r], dur, args.num_clients, args.epochs, model_name, args.dataset])
+                writer.writerow([r+1, history_acc[r], dur, args.num_clients, args.epochs, model_name, args.dataset, args.data_distr])
         print(f"Log saved to {csv_path}")
 
     # Plotting (Separated)
@@ -528,9 +802,9 @@ def main():
         plt.figure(figsize=(10, 6))
         for display_name in all_metric_results.keys():
             plt.plot(range(1, len(all_metric_results[display_name]) + 1), all_metric_results[display_name], label=display_name, marker='o')
-        plt.xlabel('Round')
+        plt.xlabel('Federated Learning Round')
         plt.ylabel('Testing Accuracy')
-        plt.title(f'Accuracy Comparison - {args.dataset}')
+        plt.title(f'Testing Accuracy - {args.model} and {args.dataset}')
         plt.legend()
         plt.grid(False)
         acc_filename = f"accuracy_{baseline_name_for_file}_{args.model}_{args.num_clients}Clients.pdf"

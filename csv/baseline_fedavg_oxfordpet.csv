@@ -1,3 +1,0 @@
-Round,Accuracy,Duration_Sec,Clients,Epochs,Model,Dataset
-1,0.02698282910874898,42.3477828502655,4,1,squeezenet,oxfordpet
-2,0.025074952303079857,26.39008903503418,4,1,squeezenet,oxfordpet

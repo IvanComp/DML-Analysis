@@ -1,3 +1,0 @@
-Round,Accuracy,Duration_Sec,Clients,Epochs,Model,Dataset
-1,0.2977,22.707073211669922,4,1,cnn,cifar10
-2,0.4176,9.102276086807251,4,1,cnn,cifar10
