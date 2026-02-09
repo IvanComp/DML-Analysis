@@ -4,7 +4,8 @@ import torch.nn.functional as F
 import torch.optim as optim
 from torchvision import datasets, transforms, models
 from torch.utils.data import DataLoader, Subset
-import torchaudio
+# from torchaudio is now imported lazily inside get_dataset if needed
+
 import flwr as fl
 from flwr.common import (
     Context,
@@ -37,6 +38,9 @@ warnings.filterwarnings("ignore", category=DeprecationWarning)
 warnings.filterwarnings("ignore", message=".*mode.*deprecated.*Pillow.*")
 
 from captum.attr import visualization as vit
+from new import FedTest
+
+
 
 
 DATASET_HYPERPARAMS = {
@@ -49,83 +53,8 @@ DATASET_HYPERPARAMS = {
 }
 
 
-class FedExp(fl.server.strategy.FedAvg):
-    def __init__(
-        self,
-        *,
-        fraction_fit: float = 1.0,
-        fraction_evaluate: float = 1.0,
-        min_fit_clients: int = 2,
-        min_evaluate_clients: int = 2,
-        min_available_clients: int = 2,
-        evaluate_fn=None,
-        on_fit_config_fn=None,
-        on_evaluate_config_fn=None,
-        accept_failures: bool = True,
-        initial_parameters: Optional[Parameters] = None,
-        fit_metrics_aggregation_fn=None,
-        evaluate_metrics_aggregation_fn=None,
-    ) -> None:
-        super().__init__(
-            fraction_fit=fraction_fit,
-            fraction_evaluate=fraction_evaluate,
-            min_fit_clients=min_fit_clients,
-            min_evaluate_clients=min_evaluate_clients,
-            min_available_clients=min_available_clients,
-            evaluate_fn=evaluate_fn,
-            on_fit_config_fn=on_fit_config_fn,
-            on_evaluate_config_fn=on_evaluate_config_fn,
-            accept_failures=accept_failures,
-            initial_parameters=initial_parameters,
-            fit_metrics_aggregation_fn=fit_metrics_aggregation_fn,
-            evaluate_metrics_aggregation_fn=evaluate_metrics_aggregation_fn,
-        )
-        self.round_number = 0
-        self.client_history = {}
-    
-    def aggregate_fit(
-        self,
-        server_round: int,
-        results: List[Tuple[ClientProxy, FitRes]],
-        failures: List[Union[Tuple[ClientProxy, FitRes], BaseException]],
-    ) -> Tuple[Optional[Parameters], Dict[str, Scalar]]:
-        if not results:
-            return None, {}
-        
-        self.round_number = server_round
-        
-        weights_results = [
-            (parameters_to_ndarrays(fit_res.parameters), fit_res.num_examples, fit_res.metrics)
-            for _, fit_res in results
-        ]
-        
-        custom_weights = []
-        for _, num_examples, metrics in weights_results:
-            client_loss = metrics.get("loss", 1.0)
-            weight = num_examples / (client_loss + 1e-6)
-            custom_weights.append(weight)
-        
-        total_weight = sum(custom_weights)
-        normalized_weights = [w / total_weight for w in custom_weights]
-        
-        aggregated_ndarrays = []
-        for i in range(len(weights_results[0][0])):
-            layer_updates = []
-            for j, (client_weights, _, _) in enumerate(weights_results):
-                weighted_layer = client_weights[i] * normalized_weights[j]
-                layer_updates.append(weighted_layer)
-            
-            aggregated_layer = np.sum(layer_updates, axis=0)
-            aggregated_ndarrays.append(aggregated_layer)
-        
-        aggregated_parameters = ndarrays_to_parameters(aggregated_ndarrays)
-        
-        metrics_aggregated = {}
-        if results:
-            losses = [fit_res.metrics.get("loss", 0.0) for _, fit_res in results]
-            metrics_aggregated["avg_loss"] = float(np.mean(losses))
-        
-        return aggregated_parameters, metrics_aggregated
+# FedExp class removed
+
 
 
 
@@ -301,7 +230,9 @@ def get_dataset(name, img_size):
         test_set = TabularDataset(X_test, y_test)
         targets = y_train
         
-        return train_set, test_set, targets
+        num_classes = len(np.unique(y_train)) # Dynamically determine num_classes for adult
+        
+        return train_set, test_set, targets, num_classes
     
     elif name.lower() == 'cifar10':
         transform = transforms.Compose([
@@ -341,7 +272,9 @@ def get_dataset(name, img_size):
         test_set = datasets.OxfordIIITPet(root='./data', split='test', download=True, transform=transform)
         targets = np.array(train_set._labels)
     elif name.lower() == 'speechcommands':
+        import torchaudio
         class SubsetSC(torchaudio.datasets.SPEECHCOMMANDS):
+
             def __init__(self, subset: str = None):
                 super().__init__("./data", download=True)
                 
@@ -359,16 +292,31 @@ def get_dataset(name, img_size):
                     excludes = set(excludes)
                     self._walker = [w for w in self._walker if w not in excludes]
         
-        train_set_raw = SubsetSC("training")
-        test_set_raw = SubsetSC("testing")
+        if name.lower() == 'speechcommands':
+            # Use 4-class subset as requested by user
+            # Common commands: 'yes', 'no', 'up', 'down'
+            subset_labels = ['yes', 'no', 'up', 'down']
+            label_to_index = {label: index for index, label in enumerate(subset_labels)}
+            num_classes = len(subset_labels)
+            
+            # Helper to check if a sample is in the subset
+            def is_in_subset(datapoint):
+                return datapoint[2] in subset_labels
 
-        labels = sorted(list(set(datapoint[2] for datapoint in train_set_raw)))
-        label_to_index = {label: index for index, label in enumerate(labels)}
+            # Load and filter raw datasets
+            train_set_raw = [d for d in SubsetSC("training") if is_in_subset(d)]
+            test_set_raw = [d for d in SubsetSC("testing") if is_in_subset(d)]
+            
+            if not train_set_raw:
+                # Fallback to standard 10+2 if subset empty (shouldn't happen with standard dataset)
+                print("Warning: Requested subset empty. Using full dataset.")
+                all_labels = sorted(list(set(datapoint[2] for datapoint in SubsetSC("training"))))
+                labels = [l for l in all_labels if l != "_background_noise_"]
+                label_to_index = {label: index for index, label in enumerate(labels)}
+                num_classes = len(labels)
+                train_set_raw = [d for d in SubsetSC("training") if d[2] != "_background_noise_"]
+                test_set_raw = [d for d in SubsetSC("testing") if d[2] != "_background_noise_"]
 
-        def pad_sequence(batch):
-            batch = [item.t() for item in batch]
-            batch = torch.nn.utils.rnn.pad_sequence(batch, batch_first=True, padding_value=0.)
-            return batch.permute(0, 2, 1)
 
         class SPEECHCOMMANDS_Processed(torch.utils.data.Dataset):
             def __init__(self, dataset, label_to_index):
@@ -391,9 +339,10 @@ def get_dataset(name, img_size):
                 else:
                     waveform = waveform[:, :self.new_sample_rate]
                 
-                label_idx = self.label_to_index.get(label, 0) # Fallback to 0 if unknown
+                label_idx = self.label_to_index.get(label, 0)
                 
-                return waveform, label_idx
+                return waveform, torch.tensor(label_idx, dtype=torch.long)
+
 
             def __len__(self):
                 return len(self.dataset)
@@ -402,17 +351,17 @@ def get_dataset(name, img_size):
         test_set = SPEECHCOMMANDS_Processed(test_set_raw, label_to_index)
         
         # Extract targets for partitioning
-        # This is slow if we iterate all, but necessary for Dirichlet sampling
-        print("  - Processing SpeechCommands targets (this may take a moment)...")
+        print(f"  - Processing {num_classes}-class SpeechCommands targets...")
         targets = []
         for i in range(len(train_set)):
             _, label = train_set[i]
-            targets.append(label)
-        targets = np.array(targets)
+            # Ensure label is int for np.array
+            targets.append(int(label))
+        targets = np.array(targets, dtype=np.int64)
         
+        return train_set, test_set, targets, num_classes
     else:
         raise ValueError(f"Unsupported dataset: {name}")
-    return train_set, test_set, targets
 
 def partition_data(dataset, targets, num_clients, alpha, num_classes):
     indices = [[] for _ in range(num_clients)]
@@ -468,7 +417,13 @@ class FlowerClient(fl.client.NumPyClient):
         for ep in range(self.epochs):
             batch_losses = []
             for data, target in self.trainloader:
-                data, target = data.to(self.device), target.to(self.device)
+                data, target = data.to(self.device), target.to(self.device).long()
+                
+                # Debug logging
+                with open("debug_log.txt", "a") as f:
+                    output_temp = self.model(data)
+                    f.write(f"Round Debug - Output shape: {output_temp.shape}, Target shape: {target.shape}, Target dtype: {target.dtype}\n")
+                
                 optimizer.zero_grad()
                 output = self.model(data)
                 loss = criterion(output, target)
@@ -490,7 +445,8 @@ class FlowerClient(fl.client.NumPyClient):
         loss = 0.0
         with torch.no_grad():
             for data, target in self.valloader:
-                data, target = data.to(self.device), target.to(self.device)
+                data, target = data.to(self.device), target.to(self.device).long()
+
                 outputs = self.model(data)
                 loss += criterion(outputs, target).item()
                 _, predicted = torch.max(outputs.data, 1)
@@ -577,8 +533,10 @@ STRATEGY_DISPLAY_NAMES = {
     'fedmedian': 'FedMedian',
     'fedadam': 'FedAdam',
     'fedprox': 'FedProx',
-    'fedexp': 'FedExp',
+    'fedtest': 'FedTest',
 }
+
+
 
 # --- 6. Main Simulation ---
 
@@ -658,15 +616,15 @@ def main():
         num_classes = 37 if args.dataset == 'oxfordpet' else 10
     
     # Load dataset
+    train_set, test_set, targets, num_classes = get_dataset(args.dataset, img_size if not (is_tabular or is_audio) else None)
+    
     if is_tabular:
-        train_set, test_set, targets = get_dataset(args.dataset, None)
         input_dim = train_set.X.shape[1]
     elif is_audio:
-        train_set, test_set, targets = get_dataset(args.dataset, None)
         input_dim = None
     else:
-        train_set, test_set, targets = get_dataset(args.dataset, img_size)
         input_dim = None
+
     
     client_indices = partition_data(train_set, targets, args.num_clients, args.data_distr, num_classes)
     
@@ -724,6 +682,9 @@ def main():
 
     all_metric_results = {}
     all_time_results = {}
+    history_acc = []
+    durations_fixed = []
+
 
     for mode in selected_baselines:
         display_name = STRATEGY_DISPLAY_NAMES.get(mode, mode)
@@ -758,9 +719,11 @@ def main():
             strategy = fl.server.strategy.FedProx(proximal_mu=0.1, **common_params)
         elif mode == 'fedmedian':
             strategy = fl.server.strategy.FedMedian(**common_params)
-        elif mode == 'fedexp':
-            strategy = FedExp(**common_params)
+        elif mode == 'fedtest':
+            strategy = FedTest(**common_params)
         else:
+
+
             print(f"Skipping unknown baseline: {mode}")
             continue
         

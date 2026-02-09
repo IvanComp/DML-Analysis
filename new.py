@@ -1,7 +1,6 @@
 """
-Custom Flower Aggregation Strategy
-This module implements a new aggregation algorithm for Federated Learning.
-The strategy can be imported and used by flower_baseline.py.
+Custom Flower Aggregation Strategy: FedTest
+This module implements the FedTest aggregation algorithm for Federated Learning.
 """
 
 import flwr as fl
@@ -14,18 +13,15 @@ from flwr.common import (
 )
 from flwr.server.client_proxy import ClientProxy
 from typing import List, Tuple, Union, Optional, Dict
-from logging import WARNING
 import numpy as np
 
 
-class NewAggregationStrategy(fl.server.strategy.FedAvg):
+class FedTest(fl.server.strategy.FedAvg):
     """
-    Custom Aggregation Strategy for Federated Learning.
+    FedTest Aggregation Strategy.
     
-    This strategy extends FedAvg and implements a custom aggregation logic.
-    You can modify the aggregate_fit method to implement your own algorithm.
-    
-    Current implementation: Custom weighted aggregation based on client performance.
+    Weights client updates based on their 'Consensus Score', which measures how 
+    well a client's update aligns with the collective trajectory (average update).
     """
     
     def __init__(
@@ -43,8 +39,8 @@ class NewAggregationStrategy(fl.server.strategy.FedAvg):
         initial_parameters: Optional[Parameters] = None,
         fit_metrics_aggregation_fn=None,
         evaluate_metrics_aggregation_fn=None,
+        consensus_alpha: float = 0.5, # Controls strength of consensus weighting
     ) -> None:
-        """Initialize the custom strategy."""
         super().__init__(
             fraction_fit=fraction_fit,
             fraction_evaluate=fraction_evaluate,
@@ -59,132 +55,86 @@ class NewAggregationStrategy(fl.server.strategy.FedAvg):
             fit_metrics_aggregation_fn=fit_metrics_aggregation_fn,
             evaluate_metrics_aggregation_fn=evaluate_metrics_aggregation_fn,
         )
-        
-        # Custom attributes for your algorithm
-        self.round_number = 0
-        self.client_history = {}  # Track client performance over rounds
-    
+        self.consensus_alpha = consensus_alpha
+
     def aggregate_fit(
         self,
         server_round: int,
         results: List[Tuple[ClientProxy, FitRes]],
         failures: List[Union[Tuple[ClientProxy, FitRes], BaseException]],
     ) -> Tuple[Optional[Parameters], Dict[str, Scalar]]:
-        """
-        Custom aggregation logic for model updates.
-        
-        This is where you implement your new aggregation algorithm.
-        Current implementation: weighted aggregation based on training loss.
-        
-        Args:
-            server_round: Current round number
-            results: List of (client, fit_result) tuples
-            failures: List of failed clients
-            
-        Returns:
-            Aggregated parameters and metrics
-        """
         if not results:
             return None, {}
-        
-        self.round_number = server_round
-        
-        # --- CUSTOM AGGREGATION LOGIC STARTS HERE ---
-        
-        # Extract weights and metrics from results
+
+        print(f"\n[FedTest] --- Round {server_round} Aggregation Started ---")
+        print(f"[FedTest] Aggregating updates from {len(results)} clients...")
+
+        # 1. Flatten all client updates to compute consensus
         weights_results = [
-            (parameters_to_ndarrays(fit_res.parameters), fit_res.num_examples, fit_res.metrics)
+            (parameters_to_ndarrays(fit_res.parameters), fit_res.num_examples)
             for _, fit_res in results
         ]
         
-        # Calculate custom weights based on client loss
-        # Lower loss = higher weight (better performing clients get more influence)
-        custom_weights = []
-        for _, num_examples, metrics in weights_results:
-            client_loss = metrics.get("loss", 1.0)
+        # Calculate standard FedAvg as base for consensus
+        total_examples = sum([num_examples for _, num_examples in weights_results])
+        base_weights = [num_examples / total_examples for _, num_examples in weights_results]
+        
+        print(f"[FedTest] Total examples: {total_examples}. Computing Global Trajectory (base average)...")
+
+        # Compute the "Global Trajectory" (standard average update)
+        avg_update = []
+        for i in range(len(weights_results[0][0])):
+            layer_updates = [client_weights[i] * base_weights[j] for j, (client_weights, _) in enumerate(weights_results)]
+            avg_update.append(np.sum(layer_updates, axis=0))
             
-            # Custom weighting: inverse of loss, scaled by number of examples
-            # You can modify this formula to implement your own algorithm
-            weight = num_examples / (client_loss + 1e-6)
-            custom_weights.append(weight)
+        flat_avg = np.concatenate([arr.flatten() for arr in avg_update])
         
-        # Normalize weights
-        total_weight = sum(custom_weights)
-        normalized_weights = [w / total_weight for w in custom_weights]
+        # 2. Compute Consensus Scores using Cosine Similarity
+        print(f"[FedTest] Calculating Consensus Scores (Cosine Similarity with trajectory)...")
+        consensus_scores = []
+        for j, (client_weights, _) in enumerate(weights_results):
+            flat_client = np.concatenate([arr.flatten() for arr in client_weights])
+            
+            # Cosine similarity between client update and average update
+            norm_c = np.linalg.norm(flat_client)
+            norm_a = np.linalg.norm(flat_avg)
+            
+            if norm_c > 0 and norm_a > 0:
+                similarity = np.dot(flat_client, flat_avg) / (norm_c * norm_a)
+            else:
+                similarity = 0.0
+                
+            consensus_scores.append(similarity)
+            print(f"  - Client {j}: Similarity = {similarity:.4f}")
+            
+        # 3. Apply Softmax to Consensus Scores to get weights
+        print(f"[FedTest] Applying Softmax normalization (alpha={self.consensus_alpha})...")
+        exp_scores = np.exp(np.array(consensus_scores) / max(self.consensus_alpha, 1e-6))
+        consensus_weights = exp_scores / np.sum(exp_scores)
         
-        # Aggregate parameters using custom weights
+        print("[FedTest] Final Consensus Weights:")
+        for j, w in enumerate(consensus_weights):
+            print(f"  - Client {j}: Weight = {w:.4f} (Base Weight was {base_weights[j]:.4f})")
+        
+        # 4. Final Aggregation using Consensus Weights
         aggregated_ndarrays = []
-        for i in range(len(weights_results[0][0])):  # For each layer
-            layer_updates = []
-            for j, (client_weights, _, _) in enumerate(weights_results):
-                weighted_layer = client_weights[i] * normalized_weights[j]
-                layer_updates.append(weighted_layer)
+        for i in range(len(weights_results[0][0])):
+            layer_updates = [client_weights[i] * consensus_weights[j] for j, (client_weights, _) in enumerate(weights_results)]
+            aggregated_ndarrays.append(np.sum(layer_updates, axis=0))
             
-            # Sum all weighted updates for this layer
-            aggregated_layer = np.sum(layer_updates, axis=0)
-            aggregated_ndarrays.append(aggregated_layer)
-        
-        # Convert back to Parameters
         aggregated_parameters = ndarrays_to_parameters(aggregated_ndarrays)
         
-        # --- CUSTOM AGGREGATION LOGIC ENDS HERE ---
-        
-        # Aggregate metrics (optional)
+        # Aggregate metrics
         metrics_aggregated = {}
         if results:
             losses = [fit_res.metrics.get("loss", 0.0) for _, fit_res in results]
             metrics_aggregated["avg_loss"] = float(np.mean(losses))
         
+        print(f"[FedTest] Round {server_round} Aggregation Complete. Avg Loss: {metrics_aggregated.get('avg_loss', 0.0):.4f}")
         return aggregated_parameters, metrics_aggregated
-    
-    def aggregate_evaluate(
-        self,
-        server_round: int,
-        results: List[Tuple[ClientProxy, fl.common.EvaluateRes]],
-        failures: List[Union[Tuple[ClientProxy, fl.common.EvaluateRes], BaseException]],
-    ) -> Tuple[Optional[float], Dict[str, Scalar]]:
-        """
-        Aggregate evaluation results from clients.
-        
-        You can also customize this if needed for your algorithm.
-        """
-        # Use default FedAvg aggregation for evaluation
-        return super().aggregate_evaluate(server_round, results, failures)
 
 
-# Alternative: You can also implement a completely custom strategy from scratch
-class NewCustomStrategy(fl.server.strategy.Strategy):
-    """
-    Completely custom strategy implementation (alternative approach).
-    Use this if you need full control over the entire strategy logic.
-    """
-    
-    def __init__(self, initial_parameters: Optional[Parameters] = None):
-        self.initial_parameters = initial_parameters
-    
-    def initialize_parameters(self, client_manager):
-        return self.initial_parameters
-    
-    def configure_fit(self, server_round, parameters, client_manager):
-        # Implement client selection and configuration for training
-        pass
-    
-    def aggregate_fit(self, server_round, results, failures):
-        # Implement custom aggregation
-        pass
-    
-    def configure_evaluate(self, server_round, parameters, client_manager):
-        # Implement client selection and configuration for evaluation
-        pass
-    
-    def aggregate_evaluate(self, server_round, results, failures):
-        # Implement evaluation aggregation
-        pass
-    
-    def evaluate(self, server_round, parameters):
-        # Optional: server-side evaluation
-        return None
+# Export FedTest
+__all__ = ['FedTest']
 
 
-# Export the strategy to be used in flower_baseline.py
-__all__ = ['NewAggregationStrategy', 'NewCustomStrategy']
