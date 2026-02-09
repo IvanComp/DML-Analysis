@@ -243,6 +243,7 @@ def get_dataset(name, img_size):
         train_set = datasets.CIFAR10(root='./data', train=True, download=True, transform=transform)
         test_set = datasets.CIFAR10(root='./data', train=False, download=True, transform=transform)
         targets = np.array(train_set.targets)
+        num_classes = 10
     elif name.lower() == 'stl10':
         transform = transforms.Compose([
             transforms.Resize((img_size, img_size)),
@@ -252,6 +253,7 @@ def get_dataset(name, img_size):
         train_set = datasets.STL10(root='./data', split='train', download=True, transform=transform)
         test_set = datasets.STL10(root='./data', split='test', download=True, transform=transform)
         targets = np.array(train_set.labels)
+        num_classes = 10
     elif name.lower() == 'mnist':
         transform = transforms.Compose([
             transforms.Resize((img_size, img_size)),
@@ -261,6 +263,7 @@ def get_dataset(name, img_size):
         train_set = datasets.MNIST(root='./data', train=True, download=True, transform=transform)
         test_set = datasets.MNIST(root='./data', train=False, download=True, transform=transform)
         targets = np.array(train_set.targets)
+        num_classes = 10
     elif name.lower() == 'oxfordpet':
         transform = transforms.Compose([
             transforms.Resize(256),
@@ -271,6 +274,7 @@ def get_dataset(name, img_size):
         train_set = datasets.OxfordIIITPet(root='./data', split='trainval', download=True, transform=transform)
         test_set = datasets.OxfordIIITPet(root='./data', split='test', download=True, transform=transform)
         targets = np.array(train_set._labels)
+        num_classes = 37
     elif name.lower() == 'speechcommands':
         import torchaudio
         class SubsetSC(torchaudio.datasets.SPEECHCOMMANDS):
@@ -358,10 +362,10 @@ def get_dataset(name, img_size):
             # Ensure label is int for np.array
             targets.append(int(label))
         targets = np.array(targets, dtype=np.int64)
-        
-        return train_set, test_set, targets, num_classes
     else:
         raise ValueError(f"Unsupported dataset: {name}")
+
+    return train_set, test_set, targets, num_classes
 
 def partition_data(dataset, targets, num_clients, alpha, num_classes):
     indices = [[] for _ in range(num_clients)]
