@@ -1,0 +1,3 @@
+Round,Accuracy,Duration_Sec,Clients,Epochs,Model,Dataset,Data Distr. (Alpha)
+1,0.1053,12.694196939468384,2,1,squeezenet,cifar10,0.5
+2,0.1071,12.694196939468384,2,1,squeezenet,cifar10,0.5

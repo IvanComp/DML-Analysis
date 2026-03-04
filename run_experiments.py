@@ -12,7 +12,7 @@ DEFAULT_ROUNDS = 10
 DEFAULT_EPOCHS = 1
 DEFAULT_BASELINE = ['all']
 
-def run_experiment(dataset, model, baseline, rounds, epochs, num_clients, data_distr):
+def run_experiment(dataset, model, baseline, rounds, epochs, num_clients, data_distr, learning_type):
     command = [
         "python3", "flower_baseline.py",
         "--dataset", dataset,
@@ -22,7 +22,8 @@ def run_experiment(dataset, model, baseline, rounds, epochs, num_clients, data_d
         "--rounds", str(rounds),
         "--epochs", str(epochs),
         "--num_clients", str(num_clients),
-        "--data-distr", str(data_distr)
+        "--data-distr", str(data_distr),
+        "--learning-type", learning_type
     ]
     
     print(f"\n" + "="*60)
@@ -45,6 +46,7 @@ def main():
     parser.add_argument('--epochs', type=int, default=DEFAULT_EPOCHS, help='Number of local epochs')
     parser.add_argument('--num_clients', type=int, default=NUM_CLIENTS, help='Number of clients')
     parser.add_argument('--data-distr', type=float, default=DATA_DISTR, help='Alpha for Dirichlet distribution')
+    parser.add_argument('--learning-type', type=str, default='FL', choices=['FL', 'SL'], help='Learning type: FL or SL')
     
     args = parser.parse_args()
     
@@ -63,7 +65,8 @@ def main():
             rounds=args.rounds,
             epochs=args.epochs,
             num_clients=args.num_clients,
-            data_distr=args.data_distr
+            data_distr=args.data_distr,
+            learning_type=getattr(args, 'learning_type', 'FL')
         )
 
 if __name__ == "__main__":
