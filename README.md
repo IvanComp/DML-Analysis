@@ -72,6 +72,7 @@ Run the simulation using `python3 flower_baseline.py`. Below are common usage ex
 - `--epochs`: Local training epochs per round.
 - `--seed`: Random seed for reproducibility.
 - `--data-distr`: Dirichlet alpha parameter (1.0 = IID, <1.0 = Non-IID).
+- `--learning_type`: Learning type (e.g., `FL`, `SL`).
 
 ## Visualization
 
