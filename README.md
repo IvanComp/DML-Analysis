@@ -4,7 +4,7 @@ This project provides a flexible framework for simulating Federated Learning (FL
 
 ## Overview
 
-The main script `flower_baseline.py` simulates a federated learning environment where clients train locally on their data partitions, and a central server aggregates their updates using a specified strategy.
+The main script `flower_baseline.py` simulates multiple training settings on top of [Flower](https://flower.ai/): centralized, federated, split, continual federated, and continual federated split learning. Clients train locally on their partitions, and Flower strategies orchestrate aggregation or sequential updates depending on the selected method.
 
 ## Available Features
 
@@ -41,6 +41,16 @@ The main script `flower_baseline.py` simulates a federated learning environment 
 | **FedAdam** | Adaptive optimization (Adam) on the server side. |
 | **FedProx** | Adds a proximal term to handle data heterogeneity. |
 
+### Learning Methods
+
+| Method | Description |
+| :--- | :--- |
+| **CL** | Centralized Learning with the full training set assigned to a single Flower client. |
+| **FL** | Standard Federated Learning with all clients participating each round. |
+| **SL** | Split Learning with round-robin client updates on a split model. |
+| **CFL** | Continual Federated Learning with per-client experience streams and replay. |
+| **CFSL** | Continual Federated Split Learning combining split models, Flower aggregation, and continual streams. |
+
 ## Installation
 
 Ensure you have Python 3.9+ and install the dependencies:
@@ -55,12 +65,37 @@ Run the simulation using `python3 flower_baseline.py`. Below are common usage ex
 
 | Scenario | Command |
 | :--- | :--- |
-| **Run FedExp on CIFAR-10** | `python3 flower_baseline.py --baseline fedexp --dataset cifar10 --model cnn` |
+| **Run FedAvg on CIFAR-10** | `python3 flower_baseline.py --baseline fedavg --dataset cifar10 --model cnn --learning-type FL` |
+| **Run Centralized Learning** | `python3 flower_baseline.py --dataset cifar10 --model cnn --learning-type CL` |
+| **Run Split Learning** | `python3 flower_baseline.py --dataset cifar10 --model cnn --learning-type SL` |
+| **Run Continual Federated Learning** | `python3 flower_baseline.py --baseline fedavg --dataset cifar10 --model cnn --learning-type CFL` |
+| **Run Fair Comparison Profile** | `python3 flower_baseline.py --baseline fedavg --dataset mnist --model cnn --learning-type CFL --comparison-profile fair` |
 | **Run SpeechCommands with M5** | `python3 flower_baseline.py --baseline fedavg --dataset speechcommands --model m5` |
 | **Run on Tabular Data** | `python3 flower_baseline.py --baseline fedavg --dataset adult --model mlp` |
 | **Set Random Seed** | `python3 flower_baseline.py --baseline fedexp --seed 57` |
 | **Non-IID Data (Dirichlet)** | `python3 flower_baseline.py --data-distr 0.5 --num_clients 10` |
 | **Run Multiple Baselines** | `python3 flower_baseline.py --baseline fedavg fedexp --rounds 20` |
+
+For repeated studies across datasets/models/client settings, use `python3 run_experiments.py`. Example:
+
+```bash
+python3 run_experiments.py \
+  --dataset mnist \
+  --model cnn \
+  --learning-type FL SL CFL CFSL \
+  --num-clients 20 \
+  --clients-per-round 5 10 20 \
+  --rounds 10 \
+  --epochs 1 \
+  --repetitions 5
+```
+
+This runner:
+- launches one experiment per unique configuration and repetition;
+- assigns a deterministic seed to each repetition;
+- archives the generated CSV/PDF artifacts into `study_runs/<study_name>/`;
+- refreshes `run_summary.csv`, `aggregate_metrics.csv`, and `pairwise_statistics.csv`;
+- computes pairwise Mann-Whitney U tests and A12 effect sizes across repeated runs.
 
 ### Arguments
 
@@ -72,9 +107,13 @@ Run the simulation using `python3 flower_baseline.py`. Below are common usage ex
 - `--epochs`: Local training epochs per round.
 - `--seed`: Random seed for reproducibility.
 - `--data-distr`: Dirichlet alpha parameter (1.0 = IID, <1.0 = Non-IID).
-- `--learning_type`: Learning type (e.g., `FL`, `SL`).
+- `--learning-type`: Learning type (`CL`, `FL`, `SL`, `CFL`, `CFSL`).
+- `--comparison-profile`: `fair` for budget-matched continual replay and logical SL rounds, `legacy` to reproduce the older behavior.
+- `--continual-steps`: Number of continual experiences per client.
+- `--continual-replay-ratio`: Replay ratio used in continual modes.
 
 ## Visualization
 
 Results are saved in `csv/` and plots in `results/`.
-You can use `visualization.ipynb` to regenerate plots from the CSV logs.
+
+Repeated studies are archived under `study_runs/`. The notebook [Results_Visualization.ipynb](/Users/ivan/Desktop/FedTest/Results_Visualization.ipynb) loads the latest study automatically, considers repetitions, and displays descriptive statistics together with Mann-Whitney U and A12 comparisons.

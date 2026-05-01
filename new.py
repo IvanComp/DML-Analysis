@@ -129,12 +129,14 @@ class FedTest(fl.server.strategy.FedAvg):
         if results:
             losses = [fit_res.metrics.get("loss", 0.0) for _, fit_res in results]
             metrics_aggregated["avg_loss"] = float(np.mean(losses))
-        
+        if self.fit_metrics_aggregation_fn is not None:
+            fit_metrics = [(res.num_examples, res.metrics) for _, res in results]
+            metrics_aggregated.update(self.fit_metrics_aggregation_fn(fit_metrics))
+
         print(f"[FedTest] Round {server_round} Aggregation Complete. Avg Loss: {metrics_aggregated.get('avg_loss', 0.0):.4f}")
         return aggregated_parameters, metrics_aggregated
 
 
 # Export FedTest
 __all__ = ['FedTest']
-
 

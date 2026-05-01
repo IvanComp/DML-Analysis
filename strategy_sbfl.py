@@ -259,6 +259,9 @@ class FedSBFL(fl.server.strategy.FedAvg):
             "total_passed": int(total_passed),
             "total_failed": int(total_failed),
         }
+        if self.fit_metrics_aggregation_fn is not None:
+            fit_metrics = [(res.num_examples, res.metrics) for _, res in results]
+            metrics_aggregated.update(self.fit_metrics_aggregation_fn(fit_metrics))
         
         return aggregated_parameters, metrics_aggregated
 

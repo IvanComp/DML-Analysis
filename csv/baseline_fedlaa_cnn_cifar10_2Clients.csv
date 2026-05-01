@@ -1,3 +1,0 @@
-Round,Accuracy,Duration_Sec,Clients,Epochs,Model,Dataset,Data Distr. (Alpha)
-1,0.1,6.3967249393463135,2,1,cnn,cifar10,0.5
-2,0.1006,6.3967249393463135,2,1,cnn,cifar10,0.5

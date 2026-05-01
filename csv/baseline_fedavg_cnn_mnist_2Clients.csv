@@ -1,2 +1,0 @@
-Round,Accuracy,Duration_Sec,Clients,Epochs,Model,Dataset,Data Distr. (Alpha)
-1,0.9828,25.70404076576233,2,1,cnn,mnist,1.0
