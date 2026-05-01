@@ -34,6 +34,7 @@ import json
 import base64
 import warnings
 import random
+from contextlib import nullcontext
 
 # Suppress warnings
 logging.getLogger("flwr").setLevel(logging.ERROR)
@@ -113,6 +114,128 @@ LEARNING_TYPE_FILE_TAGS = {
 }
 
 TRAIN_FLOP_MULTIPLIER = 3.0
+
+
+@dataclass
+class RuntimeConfig:
+    device: str
+    dataloader_num_workers: int = 0
+    pin_memory: bool = False
+    persistent_workers: bool = False
+    prefetch_factor: Optional[int] = None
+    non_blocking: bool = False
+    amp_enabled: bool = False
+
+
+def resolve_device(requested_device: str) -> str:
+    requested = str(requested_device).strip().lower()
+    if requested == "auto":
+        if torch.cuda.is_available():
+            return "cuda"
+        if torch.backends.mps.is_available():
+            return "mps"
+        return "cpu"
+    if requested == "cuda":
+        if not torch.cuda.is_available():
+            raise RuntimeError("CUDA requested but not available.")
+        return "cuda"
+    if requested == "mps":
+        if not torch.backends.mps.is_available():
+            raise RuntimeError("MPS requested but not available.")
+        return "mps"
+    if requested == "cpu":
+        return "cpu"
+    raise ValueError("Unsupported device. Use one of: auto, cuda, mps, cpu.")
+
+
+def configure_torch_runtime(device: str) -> None:
+    try:
+        torch.set_float32_matmul_precision("high")
+    except Exception:
+        pass
+
+    if device == "cuda":
+        torch.backends.cudnn.benchmark = True
+        if hasattr(torch.backends.cuda.matmul, "allow_tf32"):
+            torch.backends.cuda.matmul.allow_tf32 = True
+        if hasattr(torch.backends.cudnn, "allow_tf32"):
+            torch.backends.cudnn.allow_tf32 = True
+
+
+def resolve_dataloader_num_workers(
+    requested_num_workers: Optional[int],
+    device: str,
+    participating_clients_per_round: int,
+) -> int:
+    if requested_num_workers is not None:
+        return max(0, int(requested_num_workers))
+
+    if device != "cuda":
+        return 0
+
+    cpu_count = max(int(os.cpu_count() or 1), 1)
+    per_client_cpu_budget = max(cpu_count // max(int(participating_clients_per_round), 1), 1)
+    return max(min(per_client_cpu_budget - 1, 2), 0)
+
+
+def build_runtime_config(
+    device: str,
+    participating_clients_per_round: int,
+    requested_num_workers: Optional[int],
+    disable_cuda_amp: bool,
+) -> RuntimeConfig:
+    dataloader_num_workers = resolve_dataloader_num_workers(
+        requested_num_workers=requested_num_workers,
+        device=device,
+        participating_clients_per_round=participating_clients_per_round,
+    )
+    pin_memory = device == "cuda"
+    return RuntimeConfig(
+        device=device,
+        dataloader_num_workers=dataloader_num_workers,
+        pin_memory=pin_memory,
+        persistent_workers=dataloader_num_workers > 0,
+        prefetch_factor=2 if dataloader_num_workers > 0 else None,
+        non_blocking=pin_memory,
+        amp_enabled=(device == "cuda" and not disable_cuda_amp),
+    )
+
+
+def make_dataloader(
+    dataset,
+    batch_size: int,
+    shuffle: bool,
+    runtime_config: RuntimeConfig,
+) -> DataLoader:
+    dataloader_kwargs = {
+        "batch_size": batch_size,
+        "shuffle": shuffle,
+        "pin_memory": runtime_config.pin_memory,
+    }
+    if runtime_config.dataloader_num_workers > 0:
+        dataloader_kwargs["num_workers"] = runtime_config.dataloader_num_workers
+        dataloader_kwargs["persistent_workers"] = runtime_config.persistent_workers
+        if runtime_config.prefetch_factor is not None:
+            dataloader_kwargs["prefetch_factor"] = runtime_config.prefetch_factor
+    return DataLoader(dataset, **dataloader_kwargs)
+
+
+def move_batch_to_device(
+    data: torch.Tensor,
+    target: torch.Tensor,
+    device: str,
+    non_blocking: bool,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    return (
+        data.to(device, non_blocking=non_blocking),
+        target.to(device, non_blocking=non_blocking).long(),
+    )
+
+
+def autocast_context(device: str, enabled: bool):
+    if device == "cuda" and enabled:
+        return torch.autocast(device_type="cuda", dtype=torch.float16)
+    return nullcontext()
 
 class CNN(nn.Module):
     def __init__(self, num_classes=10, input_size=128, in_channels=3):
@@ -483,6 +606,7 @@ class SplitFedServerCopy:
         num_classes: int,
         lr: float,
         device: str,
+        amp_enabled: bool = False,
         input_dim=None,
         in_channels=None,
         img_size=None,
@@ -495,9 +619,11 @@ class SplitFedServerCopy:
             img_size=img_size,
         ).to(device)
         self.device = device
+        self.amp_enabled = bool(amp_enabled and device == "cuda")
         self.lr = lr
         self.criterion = nn.CrossEntropyLoss()
         self.optimizer = optim.SGD(self.model.parameters(), lr=self.lr, momentum=0.9)
+        self.grad_scaler = torch.cuda.amp.GradScaler(enabled=self.amp_enabled)
 
     def set_parameters(self, parameters: List[np.ndarray]) -> None:
         load_numpy_state(self.model, parameters)
@@ -511,16 +637,19 @@ class SplitFedServerCopy:
         self.model.train()
         smashed = torch.tensor(smashed_data, dtype=torch.float32, device=self.device, requires_grad=True)
         target = torch.tensor(labels, dtype=torch.long, device=self.device)
-        self.optimizer.zero_grad()
-        output = self.model(smashed)
-        loss = self.criterion(output, target)
-        loss.backward()
-        self.optimizer.step()
+        self.optimizer.zero_grad(set_to_none=True)
+        with autocast_context(self.device, self.amp_enabled):
+            output = self.model(smashed)
+            loss = self.criterion(output, target)
+        loss_scale = self.grad_scaler.get_scale() if self.amp_enabled else 1.0
+        self.grad_scaler.scale(loss).backward()
+        self.grad_scaler.step(self.optimizer)
+        self.grad_scaler.update()
         sync_device(self.device)
         server_compute_time_sec = time.perf_counter() - start_time
         return {
             "status": "ok",
-            "smashed_grad": smashed.grad.detach().cpu().numpy(),
+            "smashed_grad": (smashed.grad.detach() / loss_scale).float().cpu().numpy(),
             "loss": float(loss.item()),
             "server_compute_time_sec": float(server_compute_time_sec),
         }
@@ -530,9 +659,10 @@ class SplitFedServerCopy:
         self.model.eval()
         smashed = torch.tensor(smashed_data, dtype=torch.float32, device=self.device)
         target = torch.tensor(labels, dtype=torch.long, device=self.device)
-        with torch.no_grad():
-            output = self.model(smashed)
-            loss = self.criterion(output, target)
+        with torch.inference_mode():
+            with autocast_context(self.device, self.amp_enabled):
+                output = self.model(smashed)
+                loss = self.criterion(output, target)
             predicted = output.argmax(dim=1)
             correct = int((predicted == target).sum().item())
             total = int(target.size(0))
@@ -554,6 +684,7 @@ class SplitFedV2Server:
         num_classes: int,
         lr: float,
         device: str,
+        amp_enabled: bool = False,
         input_dim=None,
         in_channels=None,
         img_size=None,
@@ -566,9 +697,11 @@ class SplitFedV2Server:
             img_size=img_size,
         ).to(device)
         self.device = device
+        self.amp_enabled = bool(amp_enabled and device == "cuda")
         self.lr = lr
         self.criterion = nn.CrossEntropyLoss()
         self.optimizer = optim.SGD(self.model.parameters(), lr=self.lr, momentum=0.9)
+        self.grad_scaler = torch.cuda.amp.GradScaler(enabled=self.amp_enabled)
         self.current_round = 0
         self.expected_turn = 0
         self.num_expected_clients = 0
@@ -604,16 +737,19 @@ class SplitFedV2Server:
         self.model.train()
         smashed = torch.tensor(smashed_data, dtype=torch.float32, device=self.device, requires_grad=True)
         target = torch.tensor(labels, dtype=torch.long, device=self.device)
-        self.optimizer.zero_grad()
-        output = self.model(smashed)
-        loss = self.criterion(output, target)
-        loss.backward()
-        self.optimizer.step()
+        self.optimizer.zero_grad(set_to_none=True)
+        with autocast_context(self.device, self.amp_enabled):
+            output = self.model(smashed)
+            loss = self.criterion(output, target)
+        loss_scale = self.grad_scaler.get_scale() if self.amp_enabled else 1.0
+        self.grad_scaler.scale(loss).backward()
+        self.grad_scaler.step(self.optimizer)
+        self.grad_scaler.update()
         sync_device(self.device)
         server_compute_time_sec = time.perf_counter() - start_time
         return {
             "status": "ok",
-            "smashed_grad": smashed.grad.detach().cpu().numpy(),
+            "smashed_grad": (smashed.grad.detach() / loss_scale).float().cpu().numpy(),
             "loss": float(loss.item()),
             "server_compute_time_sec": float(server_compute_time_sec),
         }
@@ -633,9 +769,10 @@ class SplitFedV2Server:
         self.model.eval()
         smashed = torch.tensor(smashed_data, dtype=torch.float32, device=self.device)
         target = torch.tensor(labels, dtype=torch.long, device=self.device)
-        with torch.no_grad():
-            output = self.model(smashed)
-            loss = self.criterion(output, target)
+        with torch.inference_mode():
+            with autocast_context(self.device, self.amp_enabled):
+                output = self.model(smashed)
+                loss = self.criterion(output, target)
             predicted = output.argmax(dim=1)
             correct = int((predicted == target).sum().item())
             total = int(target.size(0))
@@ -669,7 +806,7 @@ class SplitFedV1Strategy(fl.server.strategy.FedAvg):
         if self.server_actors:
             return
         self.server_actors = [
-            SplitFedServerCopy.options(name=actor_name).remote(**self.server_actor_kwargs)
+            SplitFedServerCopy.options(name=actor_name, num_cpus=0.25).remote(**self.server_actor_kwargs)
             for actor_name in self.server_actor_names
         ]
         ray.get([actor.set_parameters.remote(self.server_parameters) for actor in self.server_actors])
@@ -725,7 +862,7 @@ class SplitFedV2Strategy(fl.server.strategy.FedAvg):
     def _ensure_server_actor(self):
         if self.server_actor is not None:
             return
-        self.server_actor = SplitFedV2Server.options(name=self.server_actor_name).remote(**self.server_actor_kwargs)
+        self.server_actor = SplitFedV2Server.options(name=self.server_actor_name, num_cpus=0.25).remote(**self.server_actor_kwargs)
         ray.get(self.server_actor.set_parameters.remote(self.server_parameters))
 
     def configure_fit(self, server_round, parameters, client_manager):
@@ -1082,6 +1219,7 @@ class FlowerClient(fl.client.NumPyClient):
         forward_flops_per_example=0.0,
         back_model=None,
         continual_schedule: Optional[ContinualSchedule] = None,
+        runtime_config: Optional[RuntimeConfig] = None,
     ):
         self.model = model
         self.back_model = back_model
@@ -1095,6 +1233,9 @@ class FlowerClient(fl.client.NumPyClient):
         self.client_id = int(client_id)
         self.forward_flops_per_example = float(forward_flops_per_example)
         self.continual_schedule = continual_schedule
+        self.runtime_config = runtime_config or RuntimeConfig(device=device)
+        self.amp_enabled = bool(self.runtime_config.amp_enabled and self.device == "cuda")
+        self.grad_scaler = torch.cuda.amp.GradScaler(enabled=self.amp_enabled)
 
     def _state_keys(self):
         front_keys = list(self.model.state_dict().keys())
@@ -1115,7 +1256,12 @@ class FlowerClient(fl.client.NumPyClient):
 
     def _make_trainloader(self, round_selection: ContinualRoundSelection) -> DataLoader:
         subset = Subset(self.trainset, round_selection.indices)
-        return DataLoader(subset, batch_size=self.batch_size, shuffle=True)
+        return make_dataloader(
+            subset,
+            batch_size=self.batch_size,
+            shuffle=True,
+            runtime_config=self.runtime_config,
+        )
 
     def get_parameters(self, config):
         params = [val.detach().cpu().numpy() for _, val in self.model.state_dict().items()]
@@ -1191,35 +1337,46 @@ class FlowerClient(fl.client.NumPyClient):
         for _ in range(self.epochs):
             batch_losses = []
             for data, target in trainloader:
-                data, target = data.to(self.device), target.to(self.device).long()
+                data, target = move_batch_to_device(
+                    data,
+                    target,
+                    self.device,
+                    self.runtime_config.non_blocking,
+                )
 
                 if self.back_model is None:
-                    optimizer_front.zero_grad()
-                    output = self.model(data)
-                    loss = criterion(output, target)
-                    loss.backward()
-                    optimizer_front.step()
+                    optimizer_front.zero_grad(set_to_none=True)
+                    with autocast_context(self.device, self.amp_enabled):
+                        output = self.model(data)
+                        loss = criterion(output, target)
+                    self.grad_scaler.scale(loss).backward()
+                    self.grad_scaler.step(optimizer_front)
+                    self.grad_scaler.update()
                     batch_losses.append(loss.item())
                     continue
 
-                optimizer_front.zero_grad()
-                optimizer_back.zero_grad()
+                optimizer_front.zero_grad(set_to_none=True)
+                optimizer_back.zero_grad(set_to_none=True)
+                with autocast_context(self.device, self.amp_enabled):
+                    smashed_data = self.model(data)
+                    detached_smashed = smashed_data.detach().clone().requires_grad_(True)
+                    output = self.back_model(detached_smashed)
+                    loss = criterion(output, target)
 
-                smashed_data = self.model(data)
-                detached_smashed = smashed_data.detach().clone().requires_grad_(True)
-                output = self.back_model(detached_smashed)
-                loss = criterion(output, target)
-                loss.backward()
-                optimizer_back.step()
+                loss_scale = self.grad_scaler.get_scale() if self.amp_enabled else 1.0
+                self.grad_scaler.scale(loss).backward()
+                self.grad_scaler.step(optimizer_back)
+                self.grad_scaler.update()
 
-                smashed_grad = detached_smashed.grad.clone()
-                optimizer_front.zero_grad()
+                smashed_grad = (detached_smashed.grad.detach().clone() / loss_scale).to(dtype=smashed_data.dtype)
+                optimizer_front.zero_grad(set_to_none=True)
                 smashed_data.backward(smashed_grad)
                 optimizer_front.step()
                 batch_losses.append(loss.item())
 
             if batch_losses:
                 epoch_losses.append(sum(batch_losses) / len(batch_losses))
+        sync_device(self.device)
         training_time_sec = time.perf_counter() - training_start
 
         avg_loss = sum(epoch_losses) / len(epoch_losses) if epoch_losses else 0.0
@@ -1259,23 +1416,33 @@ class FlowerClient(fl.client.NumPyClient):
         correct = 0
         total = 0
         loss = 0.0
-        with torch.no_grad():
+        eval_start = time.perf_counter()
+        with torch.inference_mode():
             for data, target in self.valloader:
-                data, target = data.to(self.device), target.to(self.device).long()
-                output = self.model(data)
-                if self.back_model is not None:
-                    output = self.back_model(output)
+                data, target = move_batch_to_device(
+                    data,
+                    target,
+                    self.device,
+                    self.runtime_config.non_blocking,
+                )
+                with autocast_context(self.device, self.amp_enabled):
+                    output = self.model(data)
+                    if self.back_model is not None:
+                        output = self.back_model(output)
 
                 loss += criterion(output, target).item()
                 _, predicted = torch.max(output.data, 1)
                 total += target.size(0)
                 correct += (predicted == target).sum().item()
+        sync_device(self.device)
 
         acc = correct / total if total > 0 else 0
         eval_flops = self.forward_flops_per_example * total
+        eval_time_sec = time.perf_counter() - eval_start
         return float(loss) / len(self.valloader), len(self.valloader.dataset), {
             "accuracy": float(acc),
             "eval_flops": float(eval_flops),
+            "eval_time_sec": float(eval_time_sec),
         }
 
 
@@ -1295,6 +1462,7 @@ class SplitFedClient(fl.client.NumPyClient):
         sfl_variant: str,
         server_actor_pool_names=None,
         forward_flops_per_example=0.0,
+        runtime_config: Optional[RuntimeConfig] = None,
     ):
         self.model = model
         self.trainset = trainset
@@ -1310,6 +1478,8 @@ class SplitFedClient(fl.client.NumPyClient):
         self.sfl_variant = str(sfl_variant)
         self.forward_flops_per_example = float(forward_flops_per_example)
         self._server_actor_cache = {}
+        self.runtime_config = runtime_config or RuntimeConfig(device=device)
+        self.amp_enabled = bool(self.runtime_config.amp_enabled and self.device == "cuda")
 
     def get_parameters(self, config):
         return model_state_to_numpy(self.model)
@@ -1319,7 +1489,12 @@ class SplitFedClient(fl.client.NumPyClient):
 
     def _make_trainloader(self) -> DataLoader:
         subset = Subset(self.trainset, self.train_indices)
-        return DataLoader(subset, batch_size=self.batch_size, shuffle=True)
+        return make_dataloader(
+            subset,
+            batch_size=self.batch_size,
+            shuffle=True,
+            runtime_config=self.runtime_config,
+        )
 
     def _get_named_actor(self, actor_name: str):
         if actor_name not in self._server_actor_cache:
@@ -1428,13 +1603,18 @@ class SplitFedClient(fl.client.NumPyClient):
         for _ in range(self.epochs):
             batch_losses = []
             for data, target in trainloader:
-                data = data.to(self.device)
-                target = target.to(self.device).long()
+                data, target = move_batch_to_device(
+                    data,
+                    target,
+                    self.device,
+                    self.runtime_config.non_blocking,
+                )
 
-                optimizer_front.zero_grad()
+                optimizer_front.zero_grad(set_to_none=True)
 
                 forward_start = time.perf_counter()
-                smashed_data = self.model(data)
+                with autocast_context(self.device, self.amp_enabled):
+                    smashed_data = self.model(data)
                 sync_device(self.device)
                 local_compute_time_sec += time.perf_counter() - forward_start
 
@@ -1499,15 +1679,26 @@ class SplitFedClient(fl.client.NumPyClient):
         total = 0
         correct = 0
         loss_sum = 0.0
-        with torch.no_grad():
+        local_compute_time_sec = 0.0
+        server_compute_time_sec = 0.0
+        with torch.inference_mode():
             for data, target in self.valloader:
-                data = data.to(self.device)
-                target = target.to(self.device).long()
-                smashed_data = self.model(data)
+                data, target = move_batch_to_device(
+                    data,
+                    target,
+                    self.device,
+                    self.runtime_config.non_blocking,
+                )
+                forward_start = time.perf_counter()
+                with autocast_context(self.device, self.amp_enabled):
+                    smashed_data = self.model(data)
+                sync_device(self.device)
+                local_compute_time_sec += time.perf_counter() - forward_start
                 result, _ = self._call_server_eval(
                     smashed_data=smashed_data.detach().cpu().numpy(),
                     labels=target.detach().cpu().numpy(),
                 )
+                server_compute_time_sec += float(result.get("server_compute_time_sec", 0.0))
                 total += int(result.get("total", 0.0))
                 correct += int(result.get("correct", 0.0))
                 loss_sum += float(result.get("loss_sum", 0.0))
@@ -1515,9 +1706,11 @@ class SplitFedClient(fl.client.NumPyClient):
         accuracy = correct / total if total > 0 else 0.0
         eval_flops = self.forward_flops_per_example * total
         average_loss = loss_sum / total if total > 0 else 0.0
+        eval_time_sec = local_compute_time_sec + server_compute_time_sec
         return float(average_loss), len(self.valloader.dataset), {
             "accuracy": float(accuracy),
             "eval_flops": float(eval_flops),
+            "eval_time_sec": float(eval_time_sec),
         }
 
 # --- 3. Performance Tracker ---
@@ -1592,12 +1785,19 @@ class PerformanceTracker:
         examples = [num_examples for num_examples, _ in metrics]
         total_eval_flops = sum(float(m.get("eval_flops", 0.0)) for _, m in metrics)
         total_round_flops = self._last_fit_summary["fit_flops"] + total_eval_flops
-        round_tflops = (
+        round_throughput_tflops = (
             total_round_flops / duration / 1e12
             if duration > 0.0
             else 0.0
         )
-        self.tflops.append(round_tflops)
+        total_eval_time_sec = sum(float(m.get("eval_time_sec", 0.0)) for _, m in metrics)
+        compute_time_sec = self._last_fit_summary["training_time_sum_sec"] + total_eval_time_sec
+        compute_tflops = (
+            total_round_flops / compute_time_sec / 1e12
+            if compute_time_sec > 0.0
+            else 0.0
+        )
+        self.tflops.append(compute_tflops)
         fit_summary = dict(self._last_fit_summary)
         fit_participants = max(int(round(fit_summary.get("fit_participants", 0.0))), 0)
         avg_training_time_sec = (
@@ -1620,6 +1820,11 @@ class PerformanceTracker:
             if fit_participants > 0
             else 0.0
         )
+        avg_eval_time_sec = (
+            total_eval_time_sec / len(metrics)
+            if metrics
+            else 0.0
+        )
         fit_phase_duration_sec = 0.0
         if self.fit_start_time > 0 and self.last_fit_aggregate_time > 0:
             fit_phase_duration_sec = max(self.last_fit_aggregate_time - self.fit_start_time, 0.0)
@@ -1639,7 +1844,8 @@ class PerformanceTracker:
         }
         return {
             "accuracy": sum(accs) / sum(examples),
-            "tflops": float(round_tflops),
+            "tflops": float(compute_tflops),
+            "round_tflops": float(round_throughput_tflops),
             "fit_flops": float(fit_summary["fit_flops"]),
             "eval_flops": float(total_eval_flops),
             "train_examples": float(fit_summary["train_examples"]),
@@ -1648,6 +1854,7 @@ class PerformanceTracker:
             "replay_examples": float(fit_summary["replay_examples"]),
             "eval_examples": float(sum(examples)),
             "avg_training_time_sec": float(avg_training_time_sec),
+            "avg_eval_time_sec": float(avg_eval_time_sec),
             "avg_communication_time_sec": float(avg_communication_time_sec),
             "avg_fit_time_sec": float(avg_fit_wall_time_sec),
             "avg_fit_overhead_time_sec": float(avg_fit_overhead_time_sec),
@@ -1701,25 +1908,36 @@ def collapse_sequential_round_results(
         for group in chunk_list(durations, group_size)
         if group
     ]
+    training_time_collapsed = collapse_metric_series(history, "avg_training_time_sec", group_size, reducer="sum")
+    eval_time_collapsed = collapse_metric_series(history, "avg_eval_time_sec", group_size, reducer="sum")
     tflops = []
+    round_tflops = []
     for idx, duration in enumerate(durations_collapsed):
         total_flops = 0.0
         if idx < len(fit_flops):
             total_flops += fit_flops[idx]
         if idx < len(eval_flops):
             total_flops += eval_flops[idx]
-        tflops.append(total_flops / duration / 1e12 if duration > 0.0 else 0.0)
+        compute_time = 0.0
+        if idx < len(training_time_collapsed):
+            compute_time += training_time_collapsed[idx]
+        if idx < len(eval_time_collapsed):
+            compute_time += eval_time_collapsed[idx]
+        tflops.append(total_flops / compute_time / 1e12 if compute_time > 0.0 else 0.0)
+        round_tflops.append(total_flops / duration / 1e12 if duration > 0.0 else 0.0)
 
     return {
         "accuracy": accuracies,
         "durations": durations_collapsed,
         "tflops": tflops,
+        "round_tflops": round_tflops,
         "train_examples": collapse_metric_series(history, "train_examples", group_size, reducer="sum"),
         "unique_train_examples": collapse_metric_series(history, "unique_train_examples", group_size, reducer="sum"),
         "current_examples": collapse_metric_series(history, "current_examples", group_size, reducer="sum"),
         "replay_examples": collapse_metric_series(history, "replay_examples", group_size, reducer="sum"),
         "eval_examples": collapse_metric_series(history, "eval_examples", group_size, reducer="sum"),
         "avg_training_time_sec": collapse_metric_series(history, "avg_training_time_sec", group_size, reducer="mean"),
+        "avg_eval_time_sec": collapse_metric_series(history, "avg_eval_time_sec", group_size, reducer="mean"),
         "avg_communication_time_sec": collapse_metric_series(history, "avg_communication_time_sec", group_size, reducer="mean"),
         "avg_fit_time_sec": collapse_metric_series(history, "avg_fit_time_sec", group_size, reducer="mean"),
         "avg_fit_overhead_time_sec": collapse_metric_series(history, "avg_fit_overhead_time_sec", group_size, reducer="mean"),
@@ -1731,6 +1949,7 @@ def collapse_sequential_round_results(
 def print_experiment_summary(
     args,
     device,
+    runtime_config,
     client_indices,
     targets,
     selected_baselines,
@@ -1754,6 +1973,11 @@ def print_experiment_summary(
     print(f"Model:         {args.model}")
     print(f"Learning Type: {LEARNING_TYPE_DISPLAY_NAMES[learning_type]}")
     print(f"Compare Mode:  {args.comparison_profile}")
+    print(
+        f"Runtime:       workers={runtime_config.dataloader_num_workers}, "
+        f"pin_memory={'yes' if runtime_config.pin_memory else 'no'}, "
+        f"cuda_amp={'yes' if runtime_config.amp_enabled else 'no'}"
+    )
     if learning_type in {'CFL', 'CFSL'}:
         print(
             f"Continual CFG: steps={args.continual_steps}, "
@@ -1833,6 +2057,24 @@ def main():
     parser.add_argument('--data-distr', type=float, default=1.0, help='Data distribution (1.0 for IID, < 1.0 for Dirichlet non-IID)')
     parser.add_argument('--seed', type=int, default=42, help='Random seed for reproducibility')
     parser.add_argument(
+        '--device',
+        type=str,
+        default='auto',
+        choices=['auto', 'cuda', 'mps', 'cpu'],
+        help='Execution device. Default: auto',
+    )
+    parser.add_argument(
+        '--num-workers',
+        type=int,
+        default=None,
+        help='DataLoader workers per client (default: auto-tuned for the selected device)',
+    )
+    parser.add_argument(
+        '--disable-cuda-amp',
+        action='store_true',
+        help='Disable CUDA mixed precision even when CUDA is available',
+    )
+    parser.add_argument(
         '--learning-type',
         type=str,
         default='FL',
@@ -1885,13 +2127,9 @@ def main():
     args.vis_dir = 'results'
     os.makedirs(args.vis_dir, exist_ok=True)
     os.makedirs('csv', exist_ok=True)
-    
-    if torch.cuda.is_available():
-        device = 'cuda'
-    elif torch.backends.mps.is_available():
-        device = 'mps'
-    else:
-        device = 'cpu'
+
+    device = resolve_device(args.device)
+    configure_torch_runtime(device)
 
     is_tabular = args.dataset in ['adult']
     is_audio = args.dataset in ['speechcommands']
@@ -1940,6 +2178,12 @@ def main():
     if args.clients_per_round is None:
         args.clients_per_round = effective_num_clients
     args.clients_per_round = max(1, min(int(args.clients_per_round), effective_num_clients))
+    runtime_config = build_runtime_config(
+        device=device,
+        participating_clients_per_round=args.clients_per_round,
+        requested_num_workers=args.num_workers,
+        disable_cuda_amp=args.disable_cuda_amp,
+    )
     if is_centralized:
         client_indices = [list(range(len(train_set)))]
     else:
@@ -2033,6 +2277,7 @@ def main():
                 "num_classes": num_classes,
                 "lr": args.lr,
                 "device": device,
+                "amp_enabled": runtime_config.amp_enabled,
                 "input_dim": input_dim,
                 "in_channels": in_channels,
                 "img_size": img_size,
@@ -2071,7 +2316,12 @@ def main():
                 back_model = None
 
             model = model.to(device)
-            valloader = DataLoader(test_set, batch_size=args.batch_size)
+            valloader = make_dataloader(
+                test_set,
+                batch_size=args.batch_size,
+                shuffle=False,
+                runtime_config=runtime_config,
+            )
             if uses_splitfed:
                 return SplitFedClient(
                     model=model,
@@ -2087,6 +2337,7 @@ def main():
                     server_actor_pool_names=splitfed_server_actor_names if is_splitfed_v1 else None,
                     sfl_variant=args.learning_type,
                     forward_flops_per_example=forward_flops_per_example,
+                    runtime_config=runtime_config,
                 ).to_client()
             return FlowerClient(
                 model=model,
@@ -2101,6 +2352,7 @@ def main():
                 forward_flops_per_example=forward_flops_per_example,
                 back_model=back_model,
                 continual_schedule=continual_schedules.get(cid),
+                runtime_config=runtime_config,
             ).to_client()
 
         dummy_input = torch.randn(1, input_dim).to(device) if is_tabular else (
@@ -2111,15 +2363,13 @@ def main():
         print("  - Warming up hardware (first-run initialization)...")
         warmup_model.train()
         try:
-            output = warmup_model(dummy_input)
-            if warmup_back is not None:
-                output = warmup_back(output)
+            with autocast_context(device, runtime_config.amp_enabled):
+                output = warmup_model(dummy_input)
+                if warmup_back is not None:
+                    output = warmup_back(output)
             loss = output.sum()
             loss.backward()
-            if device == 'cuda':
-                torch.cuda.synchronize()
-            elif device == 'mps':
-                torch.mps.synchronize()
+            sync_device(device)
         except Exception as e:
             print(f"    Warning: Warmup failed (not critical): {e}")
         print("  - Warmup complete.")
@@ -2127,6 +2377,7 @@ def main():
         print_experiment_summary(
             args,
             device,
+            runtime_config,
             client_indices,
             targets,
             selected_baselines,
@@ -2139,6 +2390,7 @@ def main():
         all_metric_results = {}
         all_time_results = {}
         all_tflops_results = {}
+        all_round_tflops_results = {}
         all_avg_training_time_results = {}
         all_avg_communication_time_results = {}
         all_fit_phase_duration_results = {}
@@ -2146,7 +2398,9 @@ def main():
             history_acc = []
             durations_fixed = []
             history_tflops = []
+            history_round_tflops = []
             history_avg_training_time = []
+            history_avg_eval_time = []
             history_avg_communication_time = []
             history_avg_fit_time = []
             history_avg_fit_overhead_time = []
@@ -2244,9 +2498,14 @@ def main():
                 print(f"Skipping unknown baseline: {mode}")
                 continue
 
-            client_resources = {"num_cpus": 0.5}
+            reserved_client_cpus = max(1.0, float(1 + runtime_config.dataloader_num_workers))
+            client_resources = {"num_cpus": reserved_client_cpus}
             if device == "cuda":
-                client_resources["num_gpus"] = 1.0 / max(effective_num_clients, 1)
+                parallel_gpu_clients = max(
+                    1,
+                    1 if mode == 'splitseq' else args.clients_per_round,
+                )
+                client_resources["num_gpus"] = 1.0 / float(parallel_gpu_clients)
 
             history = fl.simulation.start_simulation(
                 client_fn=client_fn,
@@ -2266,7 +2525,9 @@ def main():
                     history_acc = collapsed["accuracy"]
                     durations_fixed = collapsed["durations"]
                     history_tflops = collapsed["tflops"]
+                    history_round_tflops = collapsed["round_tflops"]
                     history_avg_training_time = collapsed["avg_training_time_sec"]
+                    history_avg_eval_time = collapsed["avg_eval_time_sec"]
                     history_avg_communication_time = collapsed["avg_communication_time_sec"]
                     history_avg_fit_time = collapsed["avg_fit_time_sec"]
                     history_avg_fit_overhead_time = collapsed["avg_fit_overhead_time_sec"]
@@ -2282,7 +2543,9 @@ def main():
                     if len(durations_fixed) > 1:
                         durations_fixed[0] = float(np.mean(durations_fixed[1:]))
                     history_tflops = [float(val) for _, val in history.metrics_distributed.get("tflops", [])]
+                    history_round_tflops = [float(val) for _, val in history.metrics_distributed.get("round_tflops", [])]
                     history_avg_training_time = [float(val) for _, val in history.metrics_distributed.get("avg_training_time_sec", [])]
+                    history_avg_eval_time = [float(val) for _, val in history.metrics_distributed.get("avg_eval_time_sec", [])]
                     history_avg_communication_time = [float(val) for _, val in history.metrics_distributed.get("avg_communication_time_sec", [])]
                     history_avg_fit_time = [float(val) for _, val in history.metrics_distributed.get("avg_fit_time_sec", [])]
                     history_avg_fit_overhead_time = [float(val) for _, val in history.metrics_distributed.get("avg_fit_overhead_time_sec", [])]
@@ -2297,6 +2560,8 @@ def main():
                 all_time_results[display_name] = durations_fixed
                 if history_tflops:
                     all_tflops_results[display_name] = history_tflops
+                if history_round_tflops:
+                    all_round_tflops_results[display_name] = history_round_tflops
                 if history_avg_training_time:
                     all_avg_training_time_results[display_name] = history_avg_training_time
                 if history_avg_communication_time:
@@ -2321,7 +2586,9 @@ def main():
                     'Data Distr. (Alpha)',
                     'Learning Type',
                     'TFLOPS',
+                    'Round_Throughput_TFLOPS',
                     'Avg_Training_Time_Sec',
+                    'Avg_Eval_Time_Sec',
                     'Avg_Communication_Time_Sec',
                     'Avg_Fit_Time_Sec',
                     'Avg_Fit_Overhead_Time_Sec',
@@ -2335,7 +2602,9 @@ def main():
                 for r in range(len(history_acc)):
                     dur = durations_fixed[r] if r < len(durations_fixed) else 0.0
                     tflops = history_tflops[r] if r < len(history_tflops) else 0.0
+                    round_tflops = history_round_tflops[r] if r < len(history_round_tflops) else 0.0
                     avg_training_time = history_avg_training_time[r] if r < len(history_avg_training_time) else 0.0
+                    avg_eval_time = history_avg_eval_time[r] if r < len(history_avg_eval_time) else 0.0
                     avg_communication_time = history_avg_communication_time[r] if r < len(history_avg_communication_time) else 0.0
                     avg_fit_time = history_avg_fit_time[r] if r < len(history_avg_fit_time) else 0.0
                     avg_fit_overhead_time = history_avg_fit_overhead_time[r] if r < len(history_avg_fit_overhead_time) else 0.0
@@ -2356,7 +2625,9 @@ def main():
                         args.data_distr,
                         LEARNING_TYPE_DISPLAY_NAMES[args.learning_type],
                         tflops,
+                        round_tflops,
                         avg_training_time,
+                        avg_eval_time,
                         avg_communication_time,
                         avg_fit_time,
                         avg_fit_overhead_time,
@@ -2408,8 +2679,8 @@ def main():
                         marker='^',
                     )
                 plt.xlabel('Round')
-                plt.ylabel('Estimated Throughput (TFLOPS)')
-                plt.title(f'TFLOPS per Round - {args.dataset} (Model: {model_name}, {LEARNING_TYPE_DISPLAY_NAMES[args.learning_type]})')
+                plt.ylabel('Compute Throughput (TFLOPS)')
+                plt.title(f'Compute TFLOPS per Round - {args.dataset} (Model: {model_name}, {LEARNING_TYPE_DISPLAY_NAMES[args.learning_type]})')
                 plt.legend()
                 plt.grid(False)
                 tflops_filename = f"tflops_{baseline_name_for_file}_{model_name}_{args.dataset}_{effective_num_clients}Clients.pdf"
@@ -2417,6 +2688,26 @@ def main():
                 plt.savefig(tflops_plot_path)
                 plt.close()
                 print(f"TFLOPS plot saved to {tflops_plot_path}")
+
+            if all_round_tflops_results:
+                plt.figure(figsize=(10, 6))
+                for display_name in all_round_tflops_results.keys():
+                    plt.plot(
+                        range(1, len(all_round_tflops_results[display_name]) + 1),
+                        all_round_tflops_results[display_name],
+                        label=display_name,
+                        marker='v',
+                    )
+                plt.xlabel('Round')
+                plt.ylabel('End-to-End Throughput (TFLOPS)')
+                plt.title(f'Round Throughput TFLOPS - {args.dataset} (Model: {model_name}, {LEARNING_TYPE_DISPLAY_NAMES[args.learning_type]})')
+                plt.legend()
+                plt.grid(False)
+                round_tflops_filename = f"round_tflops_{baseline_name_for_file}_{model_name}_{args.dataset}_{effective_num_clients}Clients.pdf"
+                round_tflops_plot_path = os.path.join(args.vis_dir, round_tflops_filename)
+                plt.savefig(round_tflops_plot_path)
+                plt.close()
+                print(f"Round TFLOPS plot saved to {round_tflops_plot_path}")
 
             if all_avg_training_time_results:
                 plt.figure(figsize=(10, 6))
