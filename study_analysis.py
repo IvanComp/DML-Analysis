@@ -93,9 +93,6 @@ PREFERENCE_MAP = {
     "Mean_Duration_Sec": "lower",
     "Mean_Avg_Training_Time_Sec": "lower",
     "Mean_Avg_Communication_Time_Sec": "lower",
-    "Mean_Avg_Fit_Time_Sec": "lower",
-    "Mean_Avg_Fit_Overhead_Time_Sec": "lower",
-    "Mean_Fit_Phase_Duration_Sec": "lower",
 }
 
 

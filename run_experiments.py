@@ -92,7 +92,6 @@ PLOT_PREFIXES = [
     "tflops",
     "training_time",
     "communication_time",
-    "fit_phase_time",
 ]
 
 

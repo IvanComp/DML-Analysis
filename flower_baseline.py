@@ -1737,7 +1737,6 @@ class SplitFedClient(fl.client.NumPyClient):
 class PerformanceTracker:
     def __init__(self):
         self.fit_start_time = 0
-        self.last_fit_aggregate_time = 0
         self.durations = []
         self.tflops = []
         self._last_fit_summary = {
@@ -1749,14 +1748,11 @@ class PerformanceTracker:
             "fit_participants": 0.0,
             "training_time_sum_sec": 0.0,
             "communication_time_sum_sec": 0.0,
-            "fit_wall_time_sum_sec": 0.0,
-            "fit_overhead_time_sum_sec": 0.0,
         }
 
     def start_fit(self, server_round: int):
         if self.fit_start_time <= 0:
             self.fit_start_time = time.time()
-            self.last_fit_aggregate_time = 0
             self._last_fit_summary = {
                 "fit_flops": 0.0,
                 "train_examples": 0.0,
@@ -1766,8 +1762,6 @@ class PerformanceTracker:
                 "fit_participants": 0.0,
                 "training_time_sum_sec": 0.0,
                 "communication_time_sum_sec": 0.0,
-                "fit_wall_time_sum_sec": 0.0,
-                "fit_overhead_time_sum_sec": 0.0,
             }
         return {"server_round": int(server_round)}
 
@@ -1781,12 +1775,9 @@ class PerformanceTracker:
             "fit_participants": float(len(metrics)),
             "training_time_sum_sec": sum(float(m.get("training_time_sec", 0.0)) for _, m in metrics),
             "communication_time_sum_sec": sum(float(m.get("communication_time_sec", 0.0)) for _, m in metrics),
-            "fit_wall_time_sum_sec": sum(float(m.get("fit_wall_time_sec", 0.0)) for _, m in metrics),
-            "fit_overhead_time_sum_sec": sum(float(m.get("fit_overhead_time_sec", 0.0)) for _, m in metrics),
         }
         for key, value in increment.items():
             self._last_fit_summary[key] += value
-        self.last_fit_aggregate_time = time.time()
         return {key: float(value) for key, value in self._last_fit_summary.items()}
 
     def stop_evaluate(self, metrics: List[Tuple[int, Dict]]):
@@ -1829,26 +1820,12 @@ class PerformanceTracker:
             if fit_participants > 0
             else 0.0
         )
-        avg_fit_wall_time_sec = (
-            fit_summary["fit_wall_time_sum_sec"] / fit_participants
-            if fit_participants > 0
-            else 0.0
-        )
-        avg_fit_overhead_time_sec = (
-            fit_summary["fit_overhead_time_sum_sec"] / fit_participants
-            if fit_participants > 0
-            else 0.0
-        )
         avg_eval_time_sec = (
             total_eval_time_sec / len(metrics)
             if metrics
             else 0.0
         )
-        fit_phase_duration_sec = 0.0
-        if self.fit_start_time > 0 and self.last_fit_aggregate_time > 0:
-            fit_phase_duration_sec = max(self.last_fit_aggregate_time - self.fit_start_time, 0.0)
         self.fit_start_time = 0
-        self.last_fit_aggregate_time = 0
         self._last_fit_summary = {
             "fit_flops": 0.0,
             "train_examples": 0.0,
@@ -1858,8 +1835,6 @@ class PerformanceTracker:
             "fit_participants": 0.0,
             "training_time_sum_sec": 0.0,
             "communication_time_sum_sec": 0.0,
-            "fit_wall_time_sum_sec": 0.0,
-            "fit_overhead_time_sum_sec": 0.0,
         }
         return {
             "accuracy": sum(accs) / sum(examples),
@@ -1875,9 +1850,6 @@ class PerformanceTracker:
             "avg_training_time_sec": float(avg_training_time_sec),
             "avg_eval_time_sec": float(avg_eval_time_sec),
             "avg_communication_time_sec": float(avg_communication_time_sec),
-            "avg_fit_time_sec": float(avg_fit_wall_time_sec),
-            "avg_fit_overhead_time_sec": float(avg_fit_overhead_time_sec),
-            "fit_phase_duration_sec": float(fit_phase_duration_sec),
         }
 
 # --- 4. Utilities ---
@@ -1958,9 +1930,6 @@ def collapse_sequential_round_results(
         "avg_training_time_sec": collapse_metric_series(history, "avg_training_time_sec", group_size, reducer="mean"),
         "avg_eval_time_sec": collapse_metric_series(history, "avg_eval_time_sec", group_size, reducer="mean"),
         "avg_communication_time_sec": collapse_metric_series(history, "avg_communication_time_sec", group_size, reducer="mean"),
-        "avg_fit_time_sec": collapse_metric_series(history, "avg_fit_time_sec", group_size, reducer="mean"),
-        "avg_fit_overhead_time_sec": collapse_metric_series(history, "avg_fit_overhead_time_sec", group_size, reducer="mean"),
-        "fit_phase_duration_sec": collapse_metric_series(history, "fit_phase_duration_sec", group_size, reducer="sum"),
         "fit_flops": fit_flops,
         "eval_flops": eval_flops,
     }
@@ -2412,7 +2381,6 @@ def main():
         all_round_tflops_results = {}
         all_avg_training_time_results = {}
         all_avg_communication_time_results = {}
-        all_fit_phase_duration_results = {}
         for mode in selected_baselines:
             history_acc = []
             durations_fixed = []
@@ -2421,9 +2389,6 @@ def main():
             history_avg_training_time = []
             history_avg_eval_time = []
             history_avg_communication_time = []
-            history_avg_fit_time = []
-            history_avg_fit_overhead_time = []
-            history_fit_phase_durations = []
             history_train_examples = []
             history_unique_train_examples = []
             history_current_examples = []
@@ -2548,9 +2513,6 @@ def main():
                     history_avg_training_time = collapsed["avg_training_time_sec"]
                     history_avg_eval_time = collapsed["avg_eval_time_sec"]
                     history_avg_communication_time = collapsed["avg_communication_time_sec"]
-                    history_avg_fit_time = collapsed["avg_fit_time_sec"]
-                    history_avg_fit_overhead_time = collapsed["avg_fit_overhead_time_sec"]
-                    history_fit_phase_durations = collapsed["fit_phase_duration_sec"]
                     history_train_examples = collapsed["train_examples"]
                     history_unique_train_examples = collapsed["unique_train_examples"]
                     history_current_examples = collapsed["current_examples"]
@@ -2566,9 +2528,6 @@ def main():
                     history_avg_training_time = [float(val) for _, val in history.metrics_distributed.get("avg_training_time_sec", [])]
                     history_avg_eval_time = [float(val) for _, val in history.metrics_distributed.get("avg_eval_time_sec", [])]
                     history_avg_communication_time = [float(val) for _, val in history.metrics_distributed.get("avg_communication_time_sec", [])]
-                    history_avg_fit_time = [float(val) for _, val in history.metrics_distributed.get("avg_fit_time_sec", [])]
-                    history_avg_fit_overhead_time = [float(val) for _, val in history.metrics_distributed.get("avg_fit_overhead_time_sec", [])]
-                    history_fit_phase_durations = [float(val) for _, val in history.metrics_distributed.get("fit_phase_duration_sec", [])]
                     history_train_examples = [float(val) for _, val in history.metrics_distributed.get("train_examples", [])]
                     history_unique_train_examples = [float(val) for _, val in history.metrics_distributed.get("unique_train_examples", [])]
                     history_current_examples = [float(val) for _, val in history.metrics_distributed.get("current_examples", [])]
@@ -2585,8 +2544,6 @@ def main():
                     all_avg_training_time_results[display_name] = history_avg_training_time
                 if history_avg_communication_time:
                     all_avg_communication_time_results[display_name] = history_avg_communication_time
-                if history_fit_phase_durations:
-                    all_fit_phase_duration_results[display_name] = history_fit_phase_durations
 
             csv_path = (
                 f"csv/baseline_{file_mode_name(mode)}_"
@@ -2609,9 +2566,6 @@ def main():
                     'Avg_Training_Time_Sec',
                     'Avg_Eval_Time_Sec',
                     'Avg_Communication_Time_Sec',
-                    'Avg_Fit_Time_Sec',
-                    'Avg_Fit_Overhead_Time_Sec',
-                    'Fit_Phase_Duration_Sec',
                     'Train_Examples',
                     'Unique_Train_Examples',
                     'Current_Examples',
@@ -2625,9 +2579,6 @@ def main():
                     avg_training_time = history_avg_training_time[r] if r < len(history_avg_training_time) else 0.0
                     avg_eval_time = history_avg_eval_time[r] if r < len(history_avg_eval_time) else 0.0
                     avg_communication_time = history_avg_communication_time[r] if r < len(history_avg_communication_time) else 0.0
-                    avg_fit_time = history_avg_fit_time[r] if r < len(history_avg_fit_time) else 0.0
-                    avg_fit_overhead_time = history_avg_fit_overhead_time[r] if r < len(history_avg_fit_overhead_time) else 0.0
-                    fit_phase_duration = history_fit_phase_durations[r] if r < len(history_fit_phase_durations) else 0.0
                     train_examples = history_train_examples[r] if r < len(history_train_examples) else 0.0
                     unique_train_examples = history_unique_train_examples[r] if r < len(history_unique_train_examples) else 0.0
                     current_examples = history_current_examples[r] if r < len(history_current_examples) else 0.0
@@ -2648,9 +2599,6 @@ def main():
                         avg_training_time,
                         avg_eval_time,
                         avg_communication_time,
-                        avg_fit_time,
-                        avg_fit_overhead_time,
-                        fit_phase_duration,
                         train_examples,
                         unique_train_examples,
                         current_examples,
@@ -2767,26 +2715,6 @@ def main():
                 plt.savefig(communication_time_plot_path)
                 plt.close()
                 print(f"Communication time plot saved to {communication_time_plot_path}")
-
-            if all_fit_phase_duration_results:
-                plt.figure(figsize=(10, 6))
-                for display_name in all_fit_phase_duration_results.keys():
-                    plt.plot(
-                        range(1, len(all_fit_phase_duration_results[display_name]) + 1),
-                        all_fit_phase_duration_results[display_name],
-                        label=display_name,
-                        marker='v',
-                    )
-                plt.xlabel('Round')
-                plt.ylabel('Fit Phase Duration (seconds)')
-                plt.title(f'Fit Phase Duration - {args.dataset} (Model: {model_name}, {LEARNING_TYPE_DISPLAY_NAMES[args.learning_type]})')
-                plt.legend()
-                plt.grid(False)
-                fit_phase_filename = f"fit_phase_time_{baseline_name_for_file}_{model_name}_{args.dataset}_{effective_num_clients}Clients.pdf"
-                fit_phase_plot_path = os.path.join(args.vis_dir, fit_phase_filename)
-                plt.savefig(fit_phase_plot_path)
-                plt.close()
-                print(f"Fit phase time plot saved to {fit_phase_plot_path}")
 
 if __name__ == "__main__":
     main()
