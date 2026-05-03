@@ -36,7 +36,7 @@ DEFAULT_OUTPUT_ROOT = "study_runs"
 DEFAULT_COMPARISON_PROFILE = "fair"
 
 IMAGE_DATASETS = {"cifar10", "stl10", "mnist", "oxfordpet"}
-IMAGE_MODELS = {"cnn", "squeezenet", "shufflenet", "resnet"}
+IMAGE_MODELS = {"cnn", "squeezenet", "shufflenet", "resnet", "vgg16"}
 TABULAR_DATASETS = {"adult"}
 TABULAR_MODELS = {"mlp"}
 AUDIO_DATASETS = {"speechcommands"}

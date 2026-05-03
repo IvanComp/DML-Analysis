@@ -42,7 +42,6 @@ warnings.filterwarnings("ignore", category=DeprecationWarning)
 warnings.filterwarnings("ignore", message=".*mode.*deprecated.*Pillow.*")
 warnings.filterwarnings("ignore", message=".*urllib3.*OpenSSL.*")
 
-from captum.attr import visualization as vit
 from newAux import FedGSW
 from strategy_laa import FedLAA
 from strategy_ama import FedAMA
@@ -345,6 +344,12 @@ def get_model(name, num_classes=10, input_size=128, in_channels=3, input_dim=Non
         if in_channels != 3:
             model.conv1 = nn.Conv2d(in_channels, 64, kernel_size=7, stride=2, padding=3, bias=False)
         return model
+
+    elif name.lower() == 'vgg16':
+        model = models.vgg16(num_classes=num_classes)
+        if in_channels != 3:
+            model.features[0] = nn.Conv2d(in_channels, 64, kernel_size=3, stride=1, padding=1)
+        return model
     
     else:
         raise ValueError(f"Unsupported model: {name}")
@@ -476,6 +481,20 @@ def get_split_models(name, num_classes=10, input_size=128, in_channels=3, input_
                     x = torch.flatten(x, 1)
                     return self.fc(x)
             return front, ResNetBack(full_model)
+        elif name.lower() == 'vgg16':
+            front = nn.Sequential(*list(full_model.features.children())[:17])
+            class VGG16Back(nn.Module):
+                def __init__(self, model):
+                    super().__init__()
+                    self.features_back = nn.Sequential(*list(model.features.children())[17:])
+                    self.avgpool = model.avgpool
+                    self.classifier = model.classifier
+                def forward(self, x):
+                    x = self.features_back(x)
+                    x = self.avgpool(x)
+                    x = torch.flatten(x, 1)
+                    return self.classifier(x)
+            return front, VGG16Back(full_model)
         else:
             raise ValueError(f"Split implementation not found for {name}")
 
@@ -2039,8 +2058,8 @@ def main():
     parser = argparse.ArgumentParser(description='Flower Baseline Simulator')
     parser.add_argument('--dataset', type=str, default='cifar10', choices=['cifar10', 'stl10', 'mnist', 'oxfordpet', 'adult', 'speechcommands'])
     parser.add_argument('--model', type=str, nargs='+', default=['cnn'], 
-                        help='Model(s) to use. Can specify multiple: --model cnn resnet',
-                        choices=['cnn', 'squeezenet', 'shufflenet', 'resnet', 'mlp', 'm5'])
+                        help='Model(s) to use. Can specify multiple: --model cnn resnet vgg16',
+                        choices=['cnn', 'squeezenet', 'shufflenet', 'resnet', 'vgg16', 'mlp', 'm5'])
     parser.add_argument('--num_clients', type=int, default=4)
     parser.add_argument(
         '--clients-per-round',
@@ -2154,7 +2173,7 @@ def main():
         models_to_run = ['m5']
     else:
         if args.dataset == 'mnist':
-            img_size = 28
+            img_size = 32 if 'vgg16' in models_to_run else 28
         elif args.dataset == 'oxfordpet':
             img_size = 224
         elif args.dataset == 'cifar10':
