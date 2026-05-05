@@ -1,0 +1,68 @@
+STAGE:2026-05-05 11:58:31 36449:5440826 ActivityProfilerController.cpp:314] Completed Stage: Warm Up
+STAGE:2026-05-05 11:58:31 36449:5440826 ActivityProfilerController.cpp:320] Completed Stage: Collection
+STAGE:2026-05-05 11:58:31 36449:5440826 ActivityProfilerController.cpp:324] Completed Stage: Post Processing
+STAGE:2026-05-05 11:58:31 36449:5440826 ActivityProfilerController.cpp:314] Completed Stage: Warm Up
+STAGE:2026-05-05 11:58:31 36449:5440826 ActivityProfilerController.cpp:320] Completed Stage: Collection
+STAGE:2026-05-05 11:58:31 36449:5440826 ActivityProfilerController.cpp:324] Completed Stage: Post Processing
+  - Estimated forward FLOPs/example: 11364608
+  - Warming up hardware (first-run initialization)...
+  - Warmup complete.
+
+==================================================
+      EXPERIMENT CONFIGURATION SUMMARY
+==================================================
+Dataset:       MNIST
+Process Unit:  MPS
+Rounds:        2
+Local Epochs:  1
+Batch Size:    32
+Num Clients:   2
+Clients/Round: 2
+Data Distr:    Alpha=0.5 (Non-IID)
+Baselines:     FedAvg
+Model:         cnn
+Learning Type: SplitFed Learning v1
+Compare Mode:  fair
+Runtime:       workers=0, pin_memory=no, cuda_amp=no
+--------------------------------------------------
+Data Distribution per Client (Label Counts):
+Client    | L0 | L1 | L2 | L3 | L4 | L5 | L6 | L7 | L8 | L9 | Total
+-------------------------------------------------------------------
+Client  0 | 146 | 1304 | 4126 | 4988 | 538 | 2584 | 319 | 6244 |  89 | 5651 | 25989
+Client  1 | 5777 | 5438 | 1832 | 1143 | 5304 | 2837 | 5599 |  21 | 5762 | 298 | 34011
+==================================================
+
+
+=== Starting Flower simulation: FedAvg (SFLV1) Baseline ===
+2026-05-05 11:58:32,915	INFO worker.py:1786 -- Started a local Ray instance.
+[36m(autoscaler +25s)[0m Tip: use `ray status` to view detailed cluster status. To disable these messages, set RAY_SCHEDULER_EVENTS=0.
+[33m(autoscaler +25s)[0m Warning: The following resource request cannot be scheduled right now: {'CPU': 0.25}. This is likely due to all cluster resources being claimed by actors. Consider creating fewer actors or adding more nodes to this Ray cluster.
+[33m(autoscaler +1m1s)[0m Warning: The following resource request cannot be scheduled right now: {'CPU': 0.25}. This is likely due to all cluster resources being claimed by actors. Consider creating fewer actors or adding more nodes to this Ray cluster.
+[33m(autoscaler +1m36s)[0m Warning: The following resource request cannot be scheduled right now: {'CPU': 0.25}. This is likely due to all cluster resources being claimed by actors. Consider creating fewer actors or adding more nodes to this Ray cluster.
+[33m(autoscaler +2m11s)[0m Warning: The following resource request cannot be scheduled right now: {'CPU': 0.25}. This is likely due to all cluster resources being claimed by actors. Consider creating fewer actors or adding more nodes to this Ray cluster.
+[33m(autoscaler +2m46s)[0m Warning: The following resource request cannot be scheduled right now: {'CPU': 0.25}. This is likely due to all cluster resources being claimed by actors. Consider creating fewer actors or adding more nodes to this Ray cluster.
+[33m(autoscaler +3m21s)[0m Warning: The following resource request cannot be scheduled right now: {'CPU': 0.25}. This is likely due to all cluster resources being claimed by actors. Consider creating fewer actors or adding more nodes to this Ray cluster.
+[33m(autoscaler +3m56s)[0m Warning: The following resource request cannot be scheduled right now: {'CPU': 0.25}. This is likely due to all cluster resources being claimed by actors. Consider creating fewer actors or adding more nodes to this Ray cluster.
+[33m(autoscaler +4m31s)[0m Warning: The following resource request cannot be scheduled right now: {'CPU': 0.25}. This is likely due to all cluster resources being claimed by actors. Consider creating fewer actors or adding more nodes to this Ray cluster.
+[33m(autoscaler +5m6s)[0m Warning: The following resource request cannot be scheduled right now: {'CPU': 0.25}. This is likely due to all cluster resources being claimed by actors. Consider creating fewer actors or adding more nodes to this Ray cluster.
+[33m(autoscaler +5m41s)[0m Warning: The following resource request cannot be scheduled right now: {'CPU': 0.25}. This is likely due to all cluster resources being claimed by actors. Consider creating fewer actors or adding more nodes to this Ray cluster.
+[33m(autoscaler +6m16s)[0m Warning: The following resource request cannot be scheduled right now: {'CPU': 0.25}. This is likely due to all cluster resources being claimed by actors. Consider creating fewer actors or adding more nodes to this Ray cluster.
+[33m(autoscaler +6m51s)[0m Warning: The following resource request cannot be scheduled right now: {'CPU': 0.25}. This is likely due to all cluster resources being claimed by actors. Consider creating fewer actors or adding more nodes to this Ray cluster.
+[33m(autoscaler +7m26s)[0m Warning: The following resource request cannot be scheduled right now: {'CPU': 0.25}. This is likely due to all cluster resources being claimed by actors. Consider creating fewer actors or adding more nodes to this Ray cluster.
+[33m(autoscaler +8m1s)[0m Warning: The following resource request cannot be scheduled right now: {'CPU': 0.25}. This is likely due to all cluster resources being claimed by actors. Consider creating fewer actors or adding more nodes to this Ray cluster.
+[33m(autoscaler +8m36s)[0m Warning: The following resource request cannot be scheduled right now: {'CPU': 0.25}. This is likely due to all cluster resources being claimed by actors. Consider creating fewer actors or adding more nodes to this Ray cluster.
+[33m(autoscaler +9m11s)[0m Warning: The following resource request cannot be scheduled right now: {'CPU': 0.25}. This is likely due to all cluster resources being claimed by actors. Consider creating fewer actors or adding more nodes to this Ray cluster.
+[33m(autoscaler +9m46s)[0m Warning: The following resource request cannot be scheduled right now: {'CPU': 0.25}. This is likely due to all cluster resources being claimed by actors. Consider creating fewer actors or adding more nodes to this Ray cluster.
+[33m(autoscaler +10m22s)[0m Warning: The following resource request cannot be scheduled right now: {'CPU': 0.25}. This is likely due to all cluster resources being claimed by actors. Consider creating fewer actors or adding more nodes to this Ray cluster.
+[33m(autoscaler +10m57s)[0m Warning: The following resource request cannot be scheduled right now: {'CPU': 0.25}. This is likely due to all cluster resources being claimed by actors. Consider creating fewer actors or adding more nodes to this Ray cluster.
+[33m(autoscaler +11m32s)[0m Warning: The following resource request cannot be scheduled right now: {'CPU': 0.25}. This is likely due to all cluster resources being claimed by actors. Consider creating fewer actors or adding more nodes to this Ray cluster.
+[33m(autoscaler +12m7s)[0m Warning: The following resource request cannot be scheduled right now: {'CPU': 0.25}. This is likely due to all cluster resources being claimed by actors. Consider creating fewer actors or adding more nodes to this Ray cluster.
+[33m(autoscaler +12m42s)[0m Warning: The following resource request cannot be scheduled right now: {'CPU': 0.25}. This is likely due to all cluster resources being claimed by actors. Consider creating fewer actors or adding more nodes to this Ray cluster.
+[33m(autoscaler +13m17s)[0m Warning: The following resource request cannot be scheduled right now: {'CPU': 0.25}. This is likely due to all cluster resources being claimed by actors. Consider creating fewer actors or adding more nodes to this Ray cluster.
+[33m(autoscaler +13m52s)[0m Warning: The following resource request cannot be scheduled right now: {'CPU': 0.25}. This is likely due to all cluster resources being claimed by actors. Consider creating fewer actors or adding more nodes to this Ray cluster.
+[33m(autoscaler +14m27s)[0m Warning: The following resource request cannot be scheduled right now: {'CPU': 0.25}. This is likely due to all cluster resources being claimed by actors. Consider creating fewer actors or adding more nodes to this Ray cluster.
+Command: /Library/Frameworks/Python.framework/Versions/3.12/bin/python3 flower_baseline.py --dataset mnist --model cnn --baseline fedavg --rounds 2 --epochs 1 --num_clients 2 --clients-per-round 2 --data-distr 0.5 --learning-type SFLV1 --comparison-profile fair --seed 190197
+Started at: 2026-05-05T11:58:25
+
+
+Process timed out.

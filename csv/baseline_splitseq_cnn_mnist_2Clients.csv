@@ -1,0 +1,3 @@
+Round,Accuracy,Duration_Sec,Clients,Epochs,Model,Dataset,Data Distr. (Alpha),Learning Type,TFLOPS,Round_Throughput_TFLOPS,Avg_Training_Time_Sec,Avg_Eval_Time_Sec,Avg_Communication_Time_Sec,Train_Examples,Unique_Train_Examples,Current_Examples,Replay_Examples,Eval_Examples
+1,0.9396,11.701189756393433,2,1,cnn,mnist,0.5,Split Learning,0.15811980877557175,0.0942413909869345,6.113107103999937,1.0742327290063258,0.008195978502044454,60000.0,60000.0,60000.0,0.0,20000.0
+2,0.9822,11.701189756393433,2,1,cnn,mnist,0.5,Split Learning,0.18255139107191207,0.19424705071192394,5.2271474369918,0.9982819794968236,0.007644395489478484,60000.0,60000.0,60000.0,0.0,20000.0

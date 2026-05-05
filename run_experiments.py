@@ -29,7 +29,7 @@ DEFAULT_LEARNING_TYPES = ["FL"]
 DEFAULT_NUM_CLIENTS = [4]
 DEFAULT_ROUNDS = 10
 DEFAULT_EPOCHS = 1
-DEFAULT_DATA_DISTR = 1.0
+DEFAULT_DATA_DISTRS = [1.0]
 DEFAULT_REPETITIONS = 1
 DEFAULT_SEED_BASE = 42
 DEFAULT_OUTPUT_ROOT = "study_runs"
@@ -223,11 +223,13 @@ def build_signature(
 
 
 def build_run_id(task: ExperimentTask) -> str:
+    alpha_slug = str(task.data_distr).replace(".", "_")
     return sanitize_slug(
         (
             f"{task.dataset}_{task.model}_{task.learning_type}"
             f"_n{task.effective_num_clients}_k{task.effective_clients_per_round}"
-            f"_r{task.rounds}_e{task.epochs}_rep{task.repetition:03d}"
+            f"_r{task.rounds}_e{task.epochs}_a{alpha_slug}"
+            f"_rep{task.repetition:03d}"
         )
     )
 
@@ -237,6 +239,7 @@ def build_tasks(args: argparse.Namespace) -> Tuple[List[ExperimentTask], List[st
     models = ordered_unique([m.lower() for m in args.model])
     learning_types = ordered_unique([normalize_learning_type(v) for v in args.learning_type])
     num_clients_values = ordered_unique([max(1, int(v)) for v in args.num_clients])
+    data_distr_values = ordered_unique([float(v) for v in args.data_distr])
     requested_k_values: List[Optional[int]]
     if args.clients_per_round:
         requested_k_values = ordered_unique([max(1, int(v)) for v in args.clients_per_round])
@@ -265,51 +268,52 @@ def build_tasks(args: argparse.Namespace) -> Tuple[List[ExperimentTask], List[st
                             requested_k=requested_k,
                             comparison_profile=args.comparison_profile,
                         )
-                        for repetition in range(1, args.repetitions + 1):
-                            signature = build_signature(
-                                dataset=dataset,
-                                model=model,
-                                learning_type=learning_type,
-                                num_clients=effective_n,
-                                clients_per_round=effective_k,
-                                rounds=args.rounds,
-                                epochs=args.epochs,
-                                data_distr=args.data_distr,
-                                comparison_profile=args.comparison_profile,
-                                batch_size=args.batch_size,
-                                lr=args.lr,
-                                repetition=repetition,
-                            )
-                            if signature in seen_signatures:
-                                continue
-                            seen_signatures.add(signature)
-                            seed = stable_seed(args.seed_base, signature, repetition)
-                            task = ExperimentTask(
-                                dataset=dataset,
-                                model=model,
-                                learning_type=learning_type,
-                                learning_type_display=LEARNING_TYPE_DISPLAY_NAMES[learning_type],
-                                requested_num_clients=requested_num_clients,
-                                effective_num_clients=effective_n,
-                                requested_clients_per_round=(
-                                    effective_k if requested_k is None else int(requested_k)
-                                ),
-                                effective_clients_per_round=effective_k,
-                                rounds=args.rounds,
-                                epochs=args.epochs,
-                                data_distr=float(args.data_distr),
-                                comparison_profile=args.comparison_profile,
-                                repetition=repetition,
-                                repetitions=args.repetitions,
-                                seed=seed,
-                                batch_size=args.batch_size,
-                                lr=args.lr,
-                                timeout_seconds=args.timeout_seconds,
-                                signature=signature,
-                                run_id="",
-                            )
-                            task = ExperimentTask(**{**asdict(task), "run_id": build_run_id(task)})
-                            tasks.append(task)
+                        for data_distr in data_distr_values:
+                            for repetition in range(1, args.repetitions + 1):
+                                signature = build_signature(
+                                    dataset=dataset,
+                                    model=model,
+                                    learning_type=learning_type,
+                                    num_clients=effective_n,
+                                    clients_per_round=effective_k,
+                                    rounds=args.rounds,
+                                    epochs=args.epochs,
+                                    data_distr=data_distr,
+                                    comparison_profile=args.comparison_profile,
+                                    batch_size=args.batch_size,
+                                    lr=args.lr,
+                                    repetition=repetition,
+                                )
+                                if signature in seen_signatures:
+                                    continue
+                                seen_signatures.add(signature)
+                                seed = stable_seed(args.seed_base, signature, repetition)
+                                task = ExperimentTask(
+                                    dataset=dataset,
+                                    model=model,
+                                    learning_type=learning_type,
+                                    learning_type_display=LEARNING_TYPE_DISPLAY_NAMES[learning_type],
+                                    requested_num_clients=requested_num_clients,
+                                    effective_num_clients=effective_n,
+                                    requested_clients_per_round=(
+                                        effective_k if requested_k is None else int(requested_k)
+                                    ),
+                                    effective_clients_per_round=effective_k,
+                                    rounds=args.rounds,
+                                    epochs=args.epochs,
+                                    data_distr=data_distr,
+                                    comparison_profile=args.comparison_profile,
+                                    repetition=repetition,
+                                    repetitions=args.repetitions,
+                                    seed=seed,
+                                    batch_size=args.batch_size,
+                                    lr=args.lr,
+                                    timeout_seconds=args.timeout_seconds,
+                                    signature=signature,
+                                    run_id="",
+                                )
+                                task = ExperimentTask(**{**asdict(task), "run_id": build_run_id(task)})
+                                tasks.append(task)
 
     return tasks, skipped_messages
 
@@ -541,7 +545,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--rounds", type=int, default=DEFAULT_ROUNDS)
     parser.add_argument("--epochs", type=int, default=DEFAULT_EPOCHS)
     parser.add_argument("--repetitions", type=int, default=DEFAULT_REPETITIONS)
-    parser.add_argument("--data-distr", type=float, default=DEFAULT_DATA_DISTR)
+    parser.add_argument(
+        "--data-distr",
+        nargs="+",
+        type=float,
+        default=DEFAULT_DATA_DISTRS,
+        help="One or more Dirichlet alpha values.",
+    )
     parser.add_argument(
         "--comparison-profile",
         choices=["fair", "legacy"],

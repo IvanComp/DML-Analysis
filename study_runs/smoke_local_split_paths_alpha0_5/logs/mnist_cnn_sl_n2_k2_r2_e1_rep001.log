@@ -1,0 +1,48 @@
+STAGE:2026-05-05 11:57:41 35823:5437938 ActivityProfilerController.cpp:314] Completed Stage: Warm Up
+STAGE:2026-05-05 11:57:41 35823:5437938 ActivityProfilerController.cpp:320] Completed Stage: Collection
+STAGE:2026-05-05 11:57:41 35823:5437938 ActivityProfilerController.cpp:324] Completed Stage: Post Processing
+STAGE:2026-05-05 11:57:41 35823:5437938 ActivityProfilerController.cpp:314] Completed Stage: Warm Up
+STAGE:2026-05-05 11:57:41 35823:5437938 ActivityProfilerController.cpp:320] Completed Stage: Collection
+STAGE:2026-05-05 11:57:41 35823:5437938 ActivityProfilerController.cpp:324] Completed Stage: Post Processing
+  - Estimated forward FLOPs/example: 11364608
+  - Warming up hardware (first-run initialization)...
+  - Warmup complete.
+
+==================================================
+      EXPERIMENT CONFIGURATION SUMMARY
+==================================================
+Dataset:       MNIST
+Process Unit:  MPS
+Rounds:        2
+Local Epochs:  1
+Batch Size:    32
+Num Clients:   2
+Clients/Round: 2
+Data Distr:    Alpha=0.5 (Non-IID)
+Baselines:     SplitSeq
+Model:         cnn
+Learning Type: Split Learning
+Compare Mode:  fair
+Runtime:       workers=0, pin_memory=no, cuda_amp=no
+--------------------------------------------------
+Data Distribution per Client (Label Counts):
+Client    | L0 | L1 | L2 | L3 | L4 | L5 | L6 | L7 | L8 | L9 | Total
+-------------------------------------------------------------------
+Client  0 | 5455 | 2746 | 131 | 5030 | 5822 | 4216 | 4086 | 2209 | 5694 | 5842 | 41231
+Client  1 | 468 | 3996 | 5827 | 1101 |  20 | 1205 | 1832 | 4056 | 157 | 107 | 18769
+==================================================
+
+
+=== Starting Flower simulation: Split Learning Baseline ===
+2026-05-05 11:57:42,709	INFO worker.py:1786 -- Started a local Ray instance.
+Log saved to csv/baseline_splitseq_cnn_mnist_2Clients.csv
+
+Accuracy plot saved to results/accuracy_splitseq_cnn_mnist_2Clients.pdf
+Time plot saved to results/time_splitseq_cnn_mnist_2Clients.pdf
+TFLOPS plot saved to results/tflops_splitseq_cnn_mnist_2Clients.pdf
+Round TFLOPS plot saved to results/round_tflops_splitseq_cnn_mnist_2Clients.pdf
+Training time plot saved to results/training_time_splitseq_cnn_mnist_2Clients.pdf
+Communication time plot saved to results/communication_time_splitseq_cnn_mnist_2Clients.pdf
+Command: /Library/Frameworks/Python.framework/Versions/3.12/bin/python3 flower_baseline.py --dataset mnist --model cnn --baseline fedavg --rounds 2 --epochs 1 --num_clients 2 --clients-per-round 2 --data-distr 0.5 --learning-type SL --comparison-profile fair --seed 325157
+Started at: 2026-05-05T11:57:36
+

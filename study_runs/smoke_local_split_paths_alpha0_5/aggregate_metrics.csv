@@ -1,0 +1,15 @@
+dataset,model,effective_num_clients,effective_clients_per_round,rounds,epochs,data_distr,comparison_profile,batch_size,lr,learning_type_display,metric,n_runs,mean,std,median,min,max
+mnist,cnn,2,2,2,1,0.5,fair,,,Split Learning,Mean_Accuracy,1,0.9609,0.0,0.9609,0.9609,0.9609
+mnist,cnn,2,2,2,1,0.5,fair,,,Split Learning,Final_Accuracy,1,0.9822,0.0,0.9822,0.9822,0.9822
+mnist,cnn,2,2,2,1,0.5,fair,,,Split Learning,Best_Accuracy,1,0.9822,0.0,0.9822,0.9822,0.9822
+mnist,cnn,2,2,2,1,0.5,fair,,,Split Learning,Mean_Duration_Sec,1,11.701189756393433,0.0,11.701189756393433,11.701189756393433,11.701189756393433
+mnist,cnn,2,2,2,1,0.5,fair,,,Split Learning,Mean_TFLOPS,1,0.17033559992374186,0.0,0.17033559992374186,0.17033559992374186,0.17033559992374186
+mnist,cnn,2,2,2,1,0.5,fair,,,Split Learning,Mean_Round_Throughput_TFLOPS,1,0.1442442208494292,0.0,0.1442442208494292,0.1442442208494292,0.1442442208494292
+mnist,cnn,2,2,2,1,0.5,fair,,,Split Learning,Mean_Avg_Training_Time_Sec,1,5.670127270495868,0.0,5.670127270495868,5.670127270495868,5.670127270495868
+mnist,cnn,2,2,2,1,0.5,fair,,,Split Learning,Mean_Avg_Eval_Time_Sec,1,1.0362573542515747,0.0,1.0362573542515747,1.0362573542515747,1.0362573542515747
+mnist,cnn,2,2,2,1,0.5,fair,,,Split Learning,Mean_Avg_Communication_Time_Sec,1,0.0079201869957614,0.0,0.0079201869957614,0.0079201869957614,0.0079201869957614
+mnist,cnn,2,2,2,1,0.5,fair,,,Split Learning,Mean_Train_Examples,1,60000.0,0.0,60000.0,60000.0,60000.0
+mnist,cnn,2,2,2,1,0.5,fair,,,Split Learning,Mean_Unique_Train_Examples,1,60000.0,0.0,60000.0,60000.0,60000.0
+mnist,cnn,2,2,2,1,0.5,fair,,,Split Learning,Mean_Current_Examples,1,60000.0,0.0,60000.0,60000.0,60000.0
+mnist,cnn,2,2,2,1,0.5,fair,,,Split Learning,Mean_Replay_Examples,1,0.0,0.0,0.0,0.0,0.0
+mnist,cnn,2,2,2,1,0.5,fair,,,Split Learning,Mean_Eval_Examples,1,20000.0,0.0,20000.0,20000.0,20000.0
