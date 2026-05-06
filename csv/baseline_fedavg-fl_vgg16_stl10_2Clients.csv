@@ -1,1 +1,0 @@
-Round,Accuracy,Duration_Sec,Clients,Epochs,Model,Dataset,Data Distr. (Alpha),Learning Type,TFLOPS,Round_Throughput_TFLOPS,Avg_Training_Time_Sec,Avg_Eval_Time_Sec,Avg_Communication_Time_Sec,Train_Examples,Unique_Train_Examples,Current_Examples,Replay_Examples,Eval_Examples

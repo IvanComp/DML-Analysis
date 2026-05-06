@@ -1,3 +1,0 @@
-Round,Accuracy,Duration_Sec,Clients,Epochs,Model,Dataset,Data Distr. (Alpha),Learning Type,TFLOPS,Round_Throughput_TFLOPS,Avg_Training_Time_Sec,Avg_Eval_Time_Sec,Avg_Communication_Time_Sec,Train_Examples,Unique_Train_Examples,Current_Examples,Replay_Examples,Eval_Examples
-1,0.4349,6.3836729526519775,2,1,cnn,cifar10,1.0,Federated Learning,0.31084406054127894,0.22691733504251002,3.5202043954923283,0.870730395487044,0.004970645502908155,50000.0,50000.0,50000.0,0.0,20000.0
-2,0.5382,6.3836729526519775,2,1,cnn,cifar10,1.0,Federated Learning,0.3401194231878509,0.4276209041796164,3.201781124982517,0.811209333507577,0.00412831298308447,50000.0,50000.0,50000.0,0.0,20000.0

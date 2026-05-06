@@ -59,6 +59,8 @@ Ensure you have Python 3.9+ and install the dependencies:
 pip install -r requirements.txt
 ```
 
+For a practical command reference covering local runs, smoke tests, and Leonardo RCM interactive execution, see [NIGHTLY_ALPHA05_FL_SFLV1_SFLV2.md](/Users/ivan/Desktop/DML-Analysis/NIGHTLY_ALPHA05_FL_SFLV1_SFLV2.md:1).
+
 ## How to Run
 
 Run the simulation using `python3 flower_baseline.py`. Below are common usage examples:
