@@ -55,6 +55,8 @@ STUDY_ARGS_DEFAULT=(
   --repetitions 1
   --data-distr 0.5
   --comparison-profile fair
+  --device cuda
+  --require-cuda
   --study-name nightly_alpha05_fl_sflv1_sflv2_100clients_10cpr_200r_1rep
 )
 

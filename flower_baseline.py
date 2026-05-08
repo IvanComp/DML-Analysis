@@ -231,6 +231,43 @@ def move_batch_to_device(
     )
 
 
+def module_device(module: Optional[nn.Module]) -> str:
+    if module is None:
+        return "none"
+    try:
+        return str(next(module.parameters()).device)
+    except StopIteration:
+        return "no-parameters"
+
+
+def ray_gpu_ids_text() -> str:
+    try:
+        return str(ray.get_gpu_ids())
+    except Exception:
+        return "unavailable"
+
+
+def log_device_check(role: str, device: str, model: Optional[nn.Module] = None, batch: Optional[torch.Tensor] = None) -> None:
+    batch_device = "none" if batch is None else str(batch.device)
+    if device == "cuda":
+        cuda_name = torch.cuda.get_device_name(torch.cuda.current_device()) if torch.cuda.is_available() else "unavailable"
+        print(
+            f"[CUDA CHECK] role={role} requested_device={device} "
+            f"cuda_available={torch.cuda.is_available()} "
+            f"cuda_visible_devices={os.environ.get('CUDA_VISIBLE_DEVICES', '<unset>')} "
+            f"ray_gpu_ids={ray_gpu_ids_text()} "
+            f"torch_current_device={torch.cuda.current_device() if torch.cuda.is_available() else 'none'} "
+            f"cuda_name={cuda_name} model_device={module_device(model)} batch_device={batch_device}",
+            flush=True,
+        )
+    else:
+        print(
+            f"[DEVICE CHECK] role={role} requested_device={device} "
+            f"model_device={module_device(model)} batch_device={batch_device}",
+            flush=True,
+        )
+
+
 def autocast_context(device: str, enabled: bool):
     if device == "cuda" and enabled:
         return torch.autocast(device_type="cuda", dtype=torch.float16)
@@ -643,6 +680,7 @@ class SplitFedServerCopy:
         self.criterion = nn.CrossEntropyLoss()
         self.optimizer = optim.SGD(self.model.parameters(), lr=self.lr, momentum=0.9)
         self.grad_scaler = torch.cuda.amp.GradScaler(enabled=self.amp_enabled)
+        log_device_check("splitfed-v1-server-actor", self.device, self.model)
 
     def set_parameters(self, parameters: List[np.ndarray]) -> None:
         load_numpy_state(self.model, parameters)
@@ -724,6 +762,7 @@ class SplitFedV2Server:
         self.current_round = 0
         self.expected_turn = 0
         self.num_expected_clients = 0
+        log_device_check("splitfed-v2-server-actor", self.device, self.model)
 
     def set_parameters(self, parameters: List[np.ndarray]) -> None:
         load_numpy_state(self.model, parameters)
@@ -812,6 +851,7 @@ class SplitFedV1Strategy(fl.server.strategy.FedAvg):
         server_actor_names: List[str],
         server_actor_kwargs: Dict[str, Union[str, int, float, None]],
         server_parameters: List[np.ndarray],
+        server_actor_num_gpus: float = 0.0,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
@@ -820,14 +860,19 @@ class SplitFedV1Strategy(fl.server.strategy.FedAvg):
         self.server_actors: List["ray.actor.ActorHandle"] = []
         self.server_parameters = server_parameters
         self.round_actor_slots: Dict[str, int] = {}
+        self.server_actor_num_gpus = max(0.0, float(server_actor_num_gpus))
 
     def _ensure_server_actors(self) -> None:
         if self.server_actors:
             return
-        self.server_actors = [
-            SplitFedServerCopy.options(name=actor_name, num_cpus=0.25).remote(**self.server_actor_kwargs)
-            for actor_name in self.server_actor_names
-        ]
+        self.server_actors = []
+        for actor_name in self.server_actor_names:
+            actor_options = {"name": actor_name, "num_cpus": 0.25}
+            if self.server_actor_num_gpus > 0.0:
+                actor_options["num_gpus"] = self.server_actor_num_gpus
+            self.server_actors.append(
+                SplitFedServerCopy.options(**actor_options).remote(**self.server_actor_kwargs)
+            )
         ray.get([actor.set_parameters.remote(self.server_parameters) for actor in self.server_actors])
 
     def configure_fit(self, server_round, parameters, client_manager):
@@ -869,6 +914,7 @@ class SplitFedV2Strategy(fl.server.strategy.FedAvg):
         server_actor_kwargs: Dict[str, Union[str, int, float, None]],
         server_parameters: List[np.ndarray],
         seed: int = 42,
+        server_actor_num_gpus: float = 0.0,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
@@ -877,11 +923,15 @@ class SplitFedV2Strategy(fl.server.strategy.FedAvg):
         self.server_parameters = server_parameters
         self.server_actor = None
         self.seed = int(seed)
+        self.server_actor_num_gpus = max(0.0, float(server_actor_num_gpus))
 
     def _ensure_server_actor(self):
         if self.server_actor is not None:
             return
-        self.server_actor = SplitFedV2Server.options(name=self.server_actor_name, num_cpus=0.25).remote(**self.server_actor_kwargs)
+        actor_options = {"name": self.server_actor_name, "num_cpus": 0.25}
+        if self.server_actor_num_gpus > 0.0:
+            actor_options["num_gpus"] = self.server_actor_num_gpus
+        self.server_actor = SplitFedV2Server.options(**actor_options).remote(**self.server_actor_kwargs)
         ray.get(self.server_actor.set_parameters.remote(self.server_parameters))
 
     def configure_fit(self, server_round, parameters, client_manager):
@@ -1255,6 +1305,7 @@ class FlowerClient(fl.client.NumPyClient):
         self.runtime_config = runtime_config or RuntimeConfig(device=device)
         self.amp_enabled = bool(self.runtime_config.amp_enabled and self.device == "cuda")
         self.grad_scaler = torch.cuda.amp.GradScaler(enabled=self.amp_enabled)
+        self._device_check_logged = False
 
     def _state_keys(self):
         front_keys = list(self.model.state_dict().keys())
@@ -1302,6 +1353,14 @@ class FlowerClient(fl.client.NumPyClient):
                 {k: torch.tensor(v) for k, v in zip(back_keys, parameters[front_count:])}
             )
             self.back_model.load_state_dict(back_state, strict=True)
+
+    def _log_training_device_once(self, batch: torch.Tensor) -> None:
+        if self._device_check_logged:
+            return
+        log_device_check(f"flower-client-{self.client_id}-training", self.device, self.model, batch)
+        if self.back_model is not None:
+            log_device_check(f"flower-client-{self.client_id}-back-model", self.device, self.back_model, batch)
+        self._device_check_logged = True
 
     def fit(self, parameters, config):
         fit_wall_start = time.perf_counter()
@@ -1362,6 +1421,7 @@ class FlowerClient(fl.client.NumPyClient):
                     self.device,
                     self.runtime_config.non_blocking,
                 )
+                self._log_training_device_once(data)
 
                 if self.back_model is None:
                     optimizer_front.zero_grad(set_to_none=True)
@@ -1499,6 +1559,7 @@ class SplitFedClient(fl.client.NumPyClient):
         self._server_actor_cache = {}
         self.runtime_config = runtime_config or RuntimeConfig(device=device)
         self.amp_enabled = bool(self.runtime_config.amp_enabled and self.device == "cuda")
+        self._device_check_logged = False
 
     def get_parameters(self, config):
         return model_state_to_numpy(self.model)
@@ -1514,6 +1575,12 @@ class SplitFedClient(fl.client.NumPyClient):
             shuffle=True,
             runtime_config=self.runtime_config,
         )
+
+    def _log_training_device_once(self, batch: torch.Tensor) -> None:
+        if self._device_check_logged:
+            return
+        log_device_check(f"splitfed-client-{self.client_id}-training", self.device, self.model, batch)
+        self._device_check_logged = True
 
     def _get_named_actor(self, actor_name: str):
         if actor_name not in self._server_actor_cache:
@@ -1628,6 +1695,7 @@ class SplitFedClient(fl.client.NumPyClient):
                     self.device,
                     self.runtime_config.non_blocking,
                 )
+                self._log_training_device_once(data)
 
                 optimizer_front.zero_grad(set_to_none=True)
 
@@ -2063,6 +2131,16 @@ def main():
         help='Disable CUDA mixed precision even when CUDA is available',
     )
     parser.add_argument(
+        '--require-cuda',
+        action='store_true',
+        help='Fail immediately unless the resolved execution device is CUDA.',
+    )
+    parser.add_argument(
+        '--skip-plots',
+        action='store_true',
+        help='Skip PDF plot generation and save CSV outputs only.',
+    )
+    parser.add_argument(
         '--learning-type',
         type=str,
         default='FL',
@@ -2117,7 +2195,13 @@ def main():
     os.makedirs('csv', exist_ok=True)
 
     device = resolve_device(args.device)
+    if args.require_cuda and device != "cuda":
+        raise RuntimeError(
+            f"CUDA is required, but the resolved device is {device.upper()}. "
+            "Check the active Python environment, PyTorch CUDA build, and SLURM GPU allocation."
+        )
     configure_torch_runtime(device)
+    log_device_check("main-process", device)
 
     is_tabular = args.dataset in ['adult']
     is_audio = args.dataset in ['speechcommands']
@@ -2257,6 +2341,7 @@ def main():
         splitfed_shared_actor_name = ""
         splitfed_initial_server_parameters: List[np.ndarray] = []
         splitfed_actor_kwargs: Dict[str, Union[str, int, float, None]] = {}
+        splitfed_server_actor_num_gpus = 0.0
         if uses_splitfed:
             _, initial_back_model = build_split_model_pair()
             splitfed_initial_server_parameters = model_state_to_numpy(initial_back_model)
@@ -2279,8 +2364,12 @@ def main():
                     f"{actor_base_name}_slot_{slot}"
                     for slot in range(args.clients_per_round)
                 ]
+                if device == "cuda":
+                    splitfed_server_actor_num_gpus = 0.5 / float(max(args.clients_per_round, 1))
             else:
                 splitfed_shared_actor_name = f"{actor_base_name}_shared"
+                if device == "cuda":
+                    splitfed_server_actor_num_gpus = 0.5
 
         if uses_split:
             warmup_front, warmup_back = build_split_model_pair()
@@ -2443,6 +2532,7 @@ def main():
                     server_actor_names=splitfed_server_actor_names,
                     server_actor_kwargs=splitfed_actor_kwargs,
                     server_parameters=[param.copy() for param in splitfed_initial_server_parameters],
+                    server_actor_num_gpus=splitfed_server_actor_num_gpus,
                     **common_params,
                 )
             elif is_splitfed_v2 and mode == 'fedavg':
@@ -2451,6 +2541,7 @@ def main():
                     server_actor_kwargs=splitfed_actor_kwargs,
                     server_parameters=[param.copy() for param in splitfed_initial_server_parameters],
                     seed=args.seed,
+                    server_actor_num_gpus=splitfed_server_actor_num_gpus,
                     **common_params,
                 )
             elif mode == 'centralized' or mode == 'fedavg':
@@ -2485,11 +2576,20 @@ def main():
             reserved_client_cpus = max(1.0, float(1 + runtime_config.dataloader_num_workers))
             client_resources = {"num_cpus": reserved_client_cpus}
             if device == "cuda":
-                parallel_gpu_clients = max(
-                    1,
-                    1 if mode == 'splitseq' else args.clients_per_round,
+                if uses_splitfed:
+                    client_resources["num_gpus"] = 0.5 / float(max(args.clients_per_round, 1))
+                else:
+                    parallel_gpu_clients = max(
+                        1,
+                        1 if mode == 'splitseq' else args.clients_per_round,
+                    )
+                    client_resources["num_gpus"] = 1.0 / float(parallel_gpu_clients)
+            print(f"Ray client resources: {client_resources}", flush=True)
+            if uses_splitfed and device == "cuda":
+                print(
+                    f"SplitFed server actor num_gpus: {splitfed_server_actor_num_gpus}",
+                    flush=True,
                 )
-                client_resources["num_gpus"] = 1.0 / float(parallel_gpu_clients)
 
             history = fl.simulation.start_simulation(
                 client_fn=client_fn,
@@ -2607,7 +2707,7 @@ def main():
                     ])
             print(f"Log saved to {csv_path}")
 
-        if all_metric_results:
+        if all_metric_results and not args.skip_plots:
             plt.figure(figsize=(10, 6))
             for display_name in all_metric_results.keys():
                 plt.plot(range(1, len(all_metric_results[display_name]) + 1), all_metric_results[display_name], label=display_name, marker='o')
@@ -2715,6 +2815,8 @@ def main():
                 plt.savefig(communication_time_plot_path)
                 plt.close()
                 print(f"Communication time plot saved to {communication_time_plot_path}")
+        elif all_metric_results:
+            print("Plot generation skipped (--skip-plots). CSV output was saved.")
 
 if __name__ == "__main__":
     main()

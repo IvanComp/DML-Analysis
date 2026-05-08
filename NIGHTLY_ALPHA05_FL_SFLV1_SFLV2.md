@@ -75,6 +75,7 @@ python run_experiments.py \
   --repetitions 1 \
   --data-distr 0.5 \
   --comparison-profile fair \
+  --device auto \
   --study-name nightly_alpha05_fl_sflv1_sflv2_100clients_10cpr_200r_1rep
 ```
 
@@ -148,6 +149,15 @@ python -m pip install -r requirements.txt
 
 mkdir -p slurm
 nvidia-smi
+python - <<'PY'
+import torch
+print("torch:", torch.__version__)
+print("cuda available:", torch.cuda.is_available())
+print("cuda devices:", torch.cuda.device_count())
+if torch.cuda.is_available():
+    print("cuda current:", torch.cuda.current_device())
+    print("cuda name:", torch.cuda.get_device_name(torch.cuda.current_device()))
+PY
 ```
 
 Comando di esecuzione:
@@ -164,6 +174,8 @@ srun python run_experiments.py \
   --repetitions 1 \
   --data-distr 0.5 \
   --comparison-profile fair \
+  --device cuda \
+  --require-cuda \
   --study-name nightly_alpha05_fl_sflv1_sflv2_100clients_10cpr_200r_1rep
 ```
 
@@ -175,6 +187,13 @@ Controlli essenziali:
 squeue -u $USER
 nvidia-smi
 tail -f study_runs/nightly_alpha05_fl_sflv1_sflv2_100clients_10cpr_200r_1rep/manifest.csv
+```
+
+Nei log dei singoli run cerca queste righe per verificare che anche i client stiano facendo training su CUDA:
+
+```bash
+grep -E "CUDA CHECK|Ray client resources|SplitFed server actor num_gpus" \
+  study_runs/nightly_alpha05_fl_sflv1_sflv2_100clients_10cpr_200r_1rep/logs/<run_id>.log
 ```
 
 Se vuoi controllare i log di un singolo run:

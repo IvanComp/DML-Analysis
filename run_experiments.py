@@ -236,12 +236,33 @@ def build_run_id(task: ExperimentTask) -> str:
     )
 
 
-def resolve_execution_device() -> str:
-    if torch.cuda.is_available():
-        return "cuda"
-    if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-        return "mps"
-    return "cpu"
+def resolve_execution_device(requested_device: str, require_cuda: bool) -> str:
+    requested = str(requested_device).strip().lower()
+    if requested == "auto":
+        if torch.cuda.is_available():
+            device = "cuda"
+        elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            device = "mps"
+        else:
+            device = "cpu"
+    elif requested == "cuda":
+        if not torch.cuda.is_available():
+            raise RuntimeError("CUDA requested but not available in this Python environment.")
+        device = "cuda"
+    elif requested == "mps":
+        if not (hasattr(torch.backends, "mps") and torch.backends.mps.is_available()):
+            raise RuntimeError("MPS requested but not available in this Python environment.")
+        device = "mps"
+    elif requested == "cpu":
+        device = "cpu"
+    else:
+        raise ValueError("Unsupported device. Use one of: auto, cuda, mps, cpu.")
+    if require_cuda and device != "cuda":
+        raise RuntimeError(
+            f"CUDA is required, but the resolved device is {device.upper()}. "
+            "Check the active Python environment and PyTorch CUDA build."
+        )
+    return device
 
 
 def build_tasks(args: argparse.Namespace) -> Tuple[List[ExperimentTask], List[str]]:
@@ -380,7 +401,7 @@ def expected_root_plot_paths(task: ExperimentTask, workspace: Path) -> List[Path
     return [workspace / "results" / f"{prefix}_{suffix}.pdf" for prefix in PLOT_PREFIXES]
 
 
-def build_command(task: ExperimentTask, device: str) -> List[str]:
+def build_command(task: ExperimentTask, device: str, require_cuda: bool) -> List[str]:
     command = [
         sys.executable,
         "flower_baseline.py",
@@ -411,6 +432,11 @@ def build_command(task: ExperimentTask, device: str) -> List[str]:
     ]
     if task.batch_size is not None:
         command.extend(["--batch_size", str(task.batch_size)])
+    if task.lr is not None:
+        command.extend(["--lr", str(task.lr)])
+    command.append("--skip-plots")
+    if require_cuda:
+        command.append("--require-cuda")
     return command
 
 
@@ -433,6 +459,8 @@ def write_study_metadata(study_dir: Path, args: argparse.Namespace, tasks: Seque
             "batch_size": args.batch_size,
             "lr": args.lr,
             "timeout_seconds": args.timeout_seconds,
+            "device": args.device,
+            "require_cuda": args.require_cuda,
         },
         "scheduled_runs": len(tasks),
     }
@@ -574,6 +602,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-root", type=str, default=DEFAULT_OUTPUT_ROOT)
     parser.add_argument("--study-name", type=str, default=None)
     parser.add_argument(
+        "--device",
+        choices=["auto", "cuda", "mps", "cpu"],
+        default="auto",
+        help="Execution device passed to flower_baseline.py.",
+    )
+    parser.add_argument(
+        "--require-cuda",
+        action="store_true",
+        help="Fail immediately unless CUDA is available and selected.",
+    )
+    parser.add_argument(
         "--force",
         action="store_true",
         help="Re-run completed configurations instead of skipping them.",
@@ -586,7 +625,7 @@ def main() -> None:
     workspace = Path.cwd()
     output_root = workspace / args.output_root
     output_root.mkdir(parents=True, exist_ok=True)
-    device = resolve_execution_device()
+    device = resolve_execution_device(args.device, args.require_cuda)
 
     if args.study_name:
         study_name = sanitize_slug(args.study_name)
@@ -631,6 +670,13 @@ def main() -> None:
             f"GPU acceleration enabled: run_experiments.py will launch every run with --device {device}.",
             flush=True,
         )
+        if device == "cuda":
+            print(
+                f"CUDA device count: {torch.cuda.device_count()} | "
+                f"current device: {torch.cuda.current_device()} | "
+                f"name: {torch.cuda.get_device_name(torch.cuda.current_device())}",
+                flush=True,
+            )
 
     for index, task in enumerate(tasks, start=1):
         if not args.force and task.signature in completed_runs:
@@ -642,7 +688,7 @@ def main() -> None:
             )
             continue
 
-        command = build_command(task, device=device)
+        command = build_command(task, device=device, require_cuda=args.require_cuda)
         log_path = study_dir / "logs" / f"{task.run_id}.log"
         started_at = datetime.now().isoformat(timespec="seconds")
         run_start = time.perf_counter()
