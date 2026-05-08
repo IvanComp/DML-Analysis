@@ -413,6 +413,9 @@ def build_command(task: ExperimentTask, device: str) -> List[str]:
         command.extend(["--batch_size", str(task.batch_size)])
     if task.lr is not None:
         command.extend(["--lr", str(task.lr)])
+    command.append("--skip-plots")
+    if task.effective_num_clients <= 2 and task.rounds <= 2 and task.epochs <= 1:
+        command.append("--fast-smoke")
     return command
 
 
