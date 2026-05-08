@@ -25,7 +25,7 @@ The main script `flower_baseline.py` simulates multiple training settings on top
 | :--- | :--- | :--- |
 | **CIFAR10** | Image | 10 classes of 32x32 color images. Standard benchmark. |
 | **MNIST** | Image | Handwritten digits (grayscale). |
-| **STL10** | Image | 10 classes, larger images (96x96). |
+| **CIFAR100** | Image | 100 classes of 32x32 color images. Harder than CIFAR-10. |
 | **OxfordPet** | Image | 37 categories of pet breeds. Fine-grained classification. |
 | **Adult** | Tabular | Census Income dataset. Binary classification (income >50K). |
 | **SpeechCommands** | Audio | Short audio commands (1 sec). 35 classes. |

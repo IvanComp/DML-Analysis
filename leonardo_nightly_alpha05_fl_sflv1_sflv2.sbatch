@@ -17,7 +17,7 @@ set -euo pipefail
 # This script does not launch anything until you submit it with sbatch.
 #
 # Default study:
-# - datasets: mnist cifar10 stl10
+# - datasets: mnist cifar10 cifar100
 # - models: cnn resnet vgg16
 # - learning types: FL SFLV1 SFLV2
 # - num clients: 100
@@ -45,7 +45,7 @@ INSTALL_REQUIREMENTS="${INSTALL_REQUIREMENTS:-0}"
 CINECA_AI_MODULE="${CINECA_AI_MODULE:-}"
 
 STUDY_ARGS_DEFAULT=(
-  --dataset mnist cifar10 stl10
+  --dataset mnist cifar10 cifar100
   --model cnn resnet vgg16
   --learning-type FL SFLV1 SFLV2
   --num-clients 100

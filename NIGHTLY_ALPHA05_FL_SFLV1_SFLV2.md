@@ -8,7 +8,7 @@ Questa guida raccoglie i comandi minimi per seguire il progetto ed eseguire gli 
 
 ## Configurazione Di Riferimento
 
-- datasets: `mnist cifar10 stl10`
+- datasets: `mnist cifar10 cifar100`
 - models: `cnn resnet vgg16`
 - approaches: `FL SFLV1 SFLV2`
 - clients: `100`
@@ -65,7 +65,7 @@ Configurazione locale equivalente a quella preparata per Leonardo:
 
 ```bash
 python run_experiments.py \
-  --dataset mnist cifar10 stl10 \
+  --dataset mnist cifar10 cifar100 \
   --model cnn resnet vgg16 \
   --learning-type FL SFLV1 SFLV2 \
   --num-clients 100 \
@@ -154,7 +154,7 @@ Comando di esecuzione:
 
 ```bash
 srun python run_experiments.py \
-  --dataset mnist cifar10 stl10 \
+  --dataset mnist cifar10 cifar100 \
   --model cnn resnet vgg16 \
   --learning-type FL SFLV1 SFLV2 \
   --num-clients 100 \

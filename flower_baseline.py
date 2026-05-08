@@ -52,7 +52,7 @@ from strategy_sequential import SequentialRoundRobin
 DATASET_HYPERPARAMS = {
     'mnist': {'lr': 0.01, 'batch_size': 32, 'epochs': 1},
     'cifar10': {'lr': 0.01, 'batch_size': 64, 'epochs': 1},
-    'stl10': {'lr': 0.01, 'batch_size': 32, 'epochs': 1},
+    'cifar100': {'lr': 0.01, 'batch_size': 64, 'epochs': 1},
     'oxfordpet': {'lr': 0.005, 'batch_size': 16, 'epochs': 1},
     'adult': {'lr': 0.01, 'batch_size': 128, 'epochs': 1},
     'speechcommands': {'lr': 0.01, 'batch_size': 32, 'epochs': 1}
@@ -974,16 +974,16 @@ def get_dataset(name, img_size):
         test_set = datasets.CIFAR10(root='./data', train=False, download=True, transform=transform)
         targets = np.array(train_set.targets)
         num_classes = 10
-    elif name.lower() == 'stl10':
+    elif name.lower() == 'cifar100':
         transform = transforms.Compose([
             transforms.Resize((img_size, img_size)),
             transforms.ToTensor(),
             transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
         ])
-        train_set = datasets.STL10(root='./data', split='train', download=True, transform=transform)
-        test_set = datasets.STL10(root='./data', split='test', download=True, transform=transform)
-        targets = np.array(train_set.labels)
-        num_classes = 10
+        train_set = datasets.CIFAR100(root='./data', train=True, download=True, transform=transform)
+        test_set = datasets.CIFAR100(root='./data', train=False, download=True, transform=transform)
+        targets = np.array(train_set.targets)
+        num_classes = 100
     elif name.lower() == 'mnist':
         transform = transforms.Compose([
             transforms.Resize((img_size, img_size)),
@@ -2025,7 +2025,7 @@ STRATEGY_DISPLAY_NAMES = {
 
 def main():
     parser = argparse.ArgumentParser(description='Flower Baseline Simulator')
-    parser.add_argument('--dataset', type=str, default='cifar10', choices=['cifar10', 'stl10', 'mnist', 'oxfordpet', 'adult', 'speechcommands'])
+    parser.add_argument('--dataset', type=str, default='cifar10', choices=['cifar10', 'cifar100', 'mnist', 'oxfordpet', 'adult', 'speechcommands'])
     parser.add_argument('--model', type=str, nargs='+', default=['cnn'], 
                         help='Model(s) to use. Can specify multiple: --model cnn resnet vgg16',
                         choices=['cnn', 'squeezenet', 'shufflenet', 'resnet', 'vgg16', 'mlp', 'm5'])
@@ -2145,7 +2145,7 @@ def main():
             img_size = 32 if 'vgg16' in models_to_run else 28
         elif args.dataset == 'oxfordpet':
             img_size = 224
-        elif args.dataset == 'cifar10':
+        elif args.dataset in {'cifar10', 'cifar100'}:
             img_size = 32
         else:
             img_size = 128

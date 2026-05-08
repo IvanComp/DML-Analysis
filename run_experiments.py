@@ -13,6 +13,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
+import torch
+
 from study_analysis import (
     AGGREGATE_STATS_FILENAME,
     MANIFEST_FILENAME,
@@ -35,7 +37,7 @@ DEFAULT_SEED_BASE = 42
 DEFAULT_OUTPUT_ROOT = "study_runs"
 DEFAULT_COMPARISON_PROFILE = "fair"
 
-IMAGE_DATASETS = {"cifar10", "stl10", "mnist", "oxfordpet"}
+IMAGE_DATASETS = {"cifar10", "cifar100", "mnist", "oxfordpet"}
 IMAGE_MODELS = {"cnn", "squeezenet", "shufflenet", "resnet", "vgg16"}
 TABULAR_DATASETS = {"adult"}
 TABULAR_MODELS = {"mlp"}
@@ -234,6 +236,14 @@ def build_run_id(task: ExperimentTask) -> str:
     )
 
 
+def resolve_execution_device() -> str:
+    if torch.cuda.is_available():
+        return "cuda"
+    if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        return "mps"
+    return "cpu"
+
+
 def build_tasks(args: argparse.Namespace) -> Tuple[List[ExperimentTask], List[str]]:
     datasets = ordered_unique([d.lower() for d in args.dataset])
     models = ordered_unique([m.lower() for m in args.model])
@@ -370,7 +380,7 @@ def expected_root_plot_paths(task: ExperimentTask, workspace: Path) -> List[Path
     return [workspace / "results" / f"{prefix}_{suffix}.pdf" for prefix in PLOT_PREFIXES]
 
 
-def build_command(task: ExperimentTask) -> List[str]:
+def build_command(task: ExperimentTask, device: str) -> List[str]:
     command = [
         sys.executable,
         "flower_baseline.py",
@@ -394,6 +404,8 @@ def build_command(task: ExperimentTask) -> List[str]:
         task.learning_type,
         "--comparison-profile",
         task.comparison_profile,
+        "--device",
+        device,
         "--seed",
         str(task.seed),
     ]
@@ -576,6 +588,7 @@ def main() -> None:
     workspace = Path.cwd()
     output_root = workspace / args.output_root
     output_root.mkdir(parents=True, exist_ok=True)
+    device = resolve_execution_device()
 
     if args.study_name:
         study_name = sanitize_slug(args.study_name)
@@ -609,9 +622,17 @@ def main() -> None:
     print(
         f"Study directory: {study_dir}\n"
         f"Scheduled runs: {total}\n"
-        f"Outputs: {study_dir / 'csv'}",
+        f"Outputs: {study_dir / 'csv'}\n"
+        f"Execution device: {device.upper()}",
         flush=True,
     )
+    if device == "cpu":
+        print("WARNING: no GPU backend detected, experiments will run on CPU.", flush=True)
+    else:
+        print(
+            f"GPU acceleration enabled: run_experiments.py will launch every run with --device {device}.",
+            flush=True,
+        )
 
     for index, task in enumerate(tasks, start=1):
         if not args.force and task.signature in completed_runs:
@@ -623,7 +644,7 @@ def main() -> None:
             )
             continue
 
-        command = build_command(task)
+        command = build_command(task, device=device)
         log_path = study_dir / "logs" / f"{task.run_id}.log"
         started_at = datetime.now().isoformat(timespec="seconds")
         run_start = time.perf_counter()
@@ -633,6 +654,7 @@ def main() -> None:
         archived_plot_paths: List[Path] = []
 
         with log_path.open("w", encoding="utf-8") as log_handle:
+            log_handle.write(f"Execution device: {device.upper()}\n")
             log_handle.write(f"Command: {' '.join(command)}\n")
             log_handle.write(f"Started at: {started_at}\n\n")
             try:
@@ -684,7 +706,7 @@ def main() -> None:
                 f"{status} {task.run_id} "
                 f"dataset={task.dataset} model={task.model} algo={task.learning_type} "
                 f"N={task.effective_num_clients} k={task.effective_clients_per_round} "
-                f"rep={task.repetition}/{task.repetitions}"
+                f"rep={task.repetition}/{task.repetitions} device={device.upper()}"
             ),
         )
 
